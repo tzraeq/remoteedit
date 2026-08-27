@@ -314,6 +314,41 @@ Save frequently used SSH/SFTP, FTP, and FTPS connections for quick access.
 - Connection favorites
 - Secure credential storage
 
+## SFTP Jump Hosts
+
+An SFTP connection can reach its target through one or more saved SFTP profiles. In either the Webview connection form or the Native Sidebar connection details, set **Jump Host** to:
+
+- **Direct** to connect to the target normally.
+- A saved SFTP profile to use that profile as the hop nearest the target.
+
+Quick Connect can also use a saved SFTP profile as its Jump Host, but temporary and unsaved connections never become Jump Host candidates. Each saved Jump Host can select another saved SFTP profile, so finite nested chains are supported without an artificial depth limit.
+
+For a target `A` reached through `B`, `C`, and outermost host `D`, configure the saved profiles in this order:
+
+1. Set `D` to **Direct**.
+2. Set `C` to use `D`.
+3. Set `B` to use `C`.
+4. Set `A` to use `B`.
+
+Remote Edit then connects along `Local → D → C → B → A`. Selecting a Jump Host does not pre-connect a visible session, start a local listener, or create a configurable port mapping. The extension creates a private SSH client for each hop, opens one internal SSH forwarding stream to the next host, and supplies that stream directly as the next SSH connection's socket. Each final target owns and cleans up its own hidden chain.
+
+Jump references are validated before network work begins. Self-references, cycles, missing profiles, and FTP/FTPS profiles are rejected instead of silently falling back to Direct. A profile that is still used as a Jump Host cannot be deleted or changed to FTP/FTPS until its references are removed. Backups preserve Jump references, while credentials remain in VS Code Secret Storage and route summaries expose names only.
+
+Jump Hosts are available only for SSH/SFTP. FTP and FTPS remain direct because their separate dynamic data connections require a different proxy design.
+
+### Isolated topology verification
+
+To prove that traffic cannot bypass the configured chain, use disposable hosts or containers with this network policy:
+
+1. Allow the workstation to reach only `D` over SSH; block direct workstation access to `C`, `B`, and `A`.
+2. Allow `D → C`, `C → B`, and `B → A` over SSH, and block non-required paths. Make `A`'s test hostname resolvable from `B` but not from the workstation.
+3. Create the four saved SFTP profiles and Jump selections in the order above. Use test-only accounts and credentials.
+4. Connect to `A` and verify directory browsing, file read/write, upload, and download. Confirm the displayed route is `Local → D → C → B → A`.
+5. Repeat with a blocked middle edge, invalid middle-hop authentication, and user cancellation. Confirm the reported stage identifies the failing hop and that server-side SSH sessions close after failure, cancellation, and normal disconnect.
+6. Run `npm test` for the deterministic graph, ordering, cancellation, and cleanup regression suite.
+
+**Verification status:** the deterministic automated suite uses controlled clients and streams and does not contact external hosts. The isolated multi-host topology above was not executed in this development environment as of 2026-08-27; its network and file-operation results are therefore not claimed here.
+
 ## Import and Export
 
 Create password-protected backups of Remote Edit data:
@@ -428,4 +463,3 @@ Enable debug and performance logs only while troubleshooting directory browsing,
 ## License
 
 Remote Edit is free to use for personal and professional use. See the [LICENSE](LICENSE) file for details.
-

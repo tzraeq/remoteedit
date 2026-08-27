@@ -2201,6 +2201,7 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
+    "test": "npm run compile && node --test out/test/JumpChain.test.js out/test/SshJumpChain.test.js",
     "watch": "tsc -watch -p ./",
     "clean": "rm -rf out"
   },

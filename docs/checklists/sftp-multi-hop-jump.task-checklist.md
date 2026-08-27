@@ -440,7 +440,7 @@
 
 ### 7. 补充自动验证、回归说明与最终验收
 
-- [ ] **测试与文档** - Jump 链 - 覆盖核心边界并完成全量回归
+- [x] **测试与文档** - Jump 链 - 覆盖核心边界并完成全量回归
   - **执行前上下文**：执行前必须读取并遵守 `执行前强制上下文`；若当前上下文未包含该段，先回读 checklist 文件顶部。
   - **目标编号**：7
   - **目标名称**：补充自动验证、回归说明与最终验收
@@ -484,5 +484,18 @@
     - `git diff --check` 通过，工作区只包含预期文件。
     - 直接 SFTP 与 FTP/FTPS 路径没有 jump 行为回归。
     - 手工/隔离拓扑验证结果如实记录；没有可用 SSH 环境时明确列为未执行的外部验证，而不影响自动验证结论。
+  - **完成时间**：2026-08-27 11:01 CST
+  - **实际产出**：
+    - `package.json` 新增单一 `npm test` 入口，先编译再显式运行两份输出测试；未增加测试框架、依赖或 lockfile 变更。
+    - 图解析测试覆盖 Direct、单跳、`D → C → B` 三跳方向、512 跳有限无环链、自引用、目标/内部/96 节点长循环、缺失和 FTP/FTPS 引用，并检查迭代 `visited`/`while` 与无深度上限常量。
+    - 运行时测试使用受控 client/stream/token 驱动真实 `SshJumpChain`，覆盖最外层探测、三跳 `sock` 顺序、`127.0.0.1:0` 内部 direct-tcpip 流、逐跳认证/keepalive、阶段错误、连接/转发取消、延迟 stream、逆序幂等清理以及 Direct/FTP/FTPS 隔离；仅使用明确标注的 synthetic fixture，不读取真实 SecretStorage。
+    - README 新增双 UI 配置、Direct、多跳顺序、无可见预连接/本地监听/可配置端口映射、SFTP-only 限制及 `D → C → B → A` 隔离拓扑步骤；CHANGELOG 新增 Unreleased 说明，并如实标注外部拓扑未执行。
+  - **资源列表**：`package.json`、`src/test/JumpChain.test.ts`、`src/test/SshJumpChain.test.ts`、`README.md`、`CHANGELOG.md`。
+  - **验证结果**：
+    - ✓ `npm test` 成功，15 项测试全部通过、0 失败；`npm run compile` 独立复跑成功。
+    - ✓ `git diff --check`、精确 scope、lockfile 与生成物检查成功；`package-lock.json` 未变化，`out/` 未跟踪。
+    - ✓ 静态契约检查确认无本地 listener、可配置 Jump 端口映射、`PortForwardManager` 耦合或深度上限；直接 SFTP 保持原探测分支，FTP/FTPS 不进入 Jump runtime。
+    - ✓ 凭据扫描只发现 synthetic fixture 与既有安全文档，错误断言确认不泄露 fixture 密码；`.cursorrules` 与 `.temp/` 不纳入提交。
+    - △ 当前环境没有可用的隔离多主机 SSH 拓扑，因此真实网络与文件操作验证未执行；README 已提供可复现步骤且未虚报结果。
 
 ---
