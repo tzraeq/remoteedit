@@ -317,7 +317,7 @@
 
 ### 5. 在 Webview 连接表单接入 Jump 选择
 
-- [ ] **Webview** - 连接配置 - 添加候选过滤、链摘要和 payload 往返
+- [x] **Webview** - 连接配置 - 添加候选过滤、链摘要和 payload 往返
   - **执行前上下文**：执行前必须读取并遵守 `执行前强制上下文`；若当前上下文未包含该段，先回读 checklist 文件顶部。
   - **目标编号**：5
   - **目标名称**：在 Webview 连接表单接入 Jump 选择
@@ -363,6 +363,18 @@
     - 自身、非 SFTP 和循环候选不可选；合法多跳候选可选。
     - 连接后可看到不含秘密的链路摘要或 via 信息。
     - `npm run compile` 通过。
+  - **完成时间**：2026-08-27 09:57 CST
+  - **实际产出**：
+    - 新增全宽 Jump Host picker 与 Direct 空值；仅展示合法 SFTP profile，使用无深度上限的迭代 `visited` 分析排除自身、缺失、非 SFTP 和任意循环，同时允许候选自身继续 Jump。
+    - Jump ID 已覆盖保存/快速连接 payload、profile/form dirty 快照、profile 与 quick-session 往返、连接匹配、类型切换、profile 刷新、dropdown 互斥及连接状态锁定；失效 ID 保留并阻止建连，不静默退化为直连。
+    - 表单、活动文本和 session tooltip 使用最外层到最近层的安全名称显示 `Local → ... → Target` / `via ...`；Webview 不接收凭据或运行时 `jumpChain`，宿主日志只增加名称级 `Via`。
+    - 该 UI 只提交 `jumpProfileId` 给任务 4 runtime；未引入本地监听、可配置端口映射或 `PortForwardManager` 接入。
+  - **资源列表**：`src/panel/RemoteEditPanel.ts`、`src/panel/webview/markup/Body.ts`、`src/panel/webview/scripts/StateDialogs.ts`、`src/panel/webview/scripts/RemoteSearch.ts`、`src/panel/webview/scripts/RemoteCommandActions.ts`、`src/panel/webview/scripts/TransferContextActions.ts`、`src/panel/webview/scripts/LayoutSessions.ts`、`src/panel/webview/scripts/TransfersStatus.ts`、`src/panel/webview/styles/Styles.ts`。
+  - **验证结果**：
+    - ✓ `npm run compile`、完整生成脚本解析和 `git diff --check` 成功。
+    - ✓ 聚焦验证覆盖嵌套链方向、合法 quick 多跳、自身/缺失/非 SFTP/循环过滤、首次 profile 填充、失效值保留、FTP 清空及 128 跳有限无环链。
+    - ✓ 新增行安全扫描未发现凭据 payload、本地监听、端口映射或 `PortForwardManager`；工作树范围仅为本任务九个源码文件与 checklist。
+    - △ 未使用真实多主机 SSH 拓扑；不虚报外部网络验证，留待任务 7 的可复现验收步骤。
 
 ---
 
