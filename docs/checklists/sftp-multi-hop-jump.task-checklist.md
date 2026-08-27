@@ -380,7 +380,7 @@
 
 ### 6. 在原生侧边栏接入 Jump 详情与编辑
 
-- [ ] **Sidebar** - 连接配置 - 扩展草稿、详情项和 QuickPick 编辑流程
+- [x] **Sidebar** - 连接配置 - 扩展草稿、详情项和 QuickPick 编辑流程
   - **执行前上下文**：执行前必须读取并遵守 `执行前强制上下文`；若当前上下文未包含该段，先回读 checklist 文件顶部。
   - **目标编号**：6
   - **目标名称**：在原生侧边栏接入 Jump 详情与编辑
@@ -421,6 +421,18 @@
     - Direct、切换协议、保存、放弃和重载行为一致。
     - 详情与 tooltip 不泄露凭据。
     - `npm run compile` 通过。
+  - **完成时间**：2026-08-27 10:31 CST
+  - **实际产出**：
+    - `jumpProfileId` 已覆盖新建、已有和 Quick Connect 草稿的规范化与重建；Direct 使用显式空串清除，FTP/FTPS 强制直连，保存、放弃、重载、私钥认证以及 Connect Without Saving 的完整 profile 合并保持一致。
+    - SFTP 详情新增 Jump Host 行；guided add 与详情编辑使用 Direct-first QuickPick，只列出解析后合法的已保存 SFTP profile，并区分名称、endpoint 与 `Local → ... → Target` 完整路线；解析复用无深度上限的迭代 resolver。
+    - 保存/Quick tooltip 展示安全 route，活动连接只使用 names-only `jumpProfileNames` 展示 `Via`；动态 Markdown 保持不可信并转义，侧边栏只传 ID，不接收凭据或运行时 chain。
+    - 未增加本地监听、可配置端口映射、`PortForwardManager` 接入或可见 Jump 会话；选择 Jump 后仍由现有 SSH runtime 自动建立内部 `forwardOut()`/`sock` 链。
+  - **资源列表**：`src/sidebar/ConnectionDraftStore.ts`、`src/sidebar/ItemHelpers.ts`、`src/sidebar/Items.ts`、`src/sidebar/TreeProviders.ts`、`src/sidebar/SidebarController.ts`。
+  - **验证结果**：
+    - ✓ `npm run compile` 与 `git diff --check` 成功。
+    - ✓ 46 项隔离断言覆盖保存/Quick/新草稿、Direct、协议往返、保存基础值合并、放弃/重载、私钥上下文、自身/缺失/非 SFTP/循环过滤、嵌套 route、128 跳无环链及 tooltip 转义。
+    - ✓ 精确 scope 与新增行安全扫描未发现本地监听、端口映射、runtime `jumpChain`、凭据数据字段或深度上限；`.cursorrules` 与 `.temp/` 未纳入提交。
+    - △ 未虚报真实 VS Code 点击流程或多主机 SSH 拓扑；可复现自动测试和外部拓扑说明留待任务 7。
 
 ---
 
