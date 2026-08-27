@@ -1,0 +1,432 @@
+# SFTP 多级 Jump 连接链 - Checklist
+
+## 概述
+
+为 Remote Edit 的 SFTP 连接增加基于已保存 SFTP profile 的多级 Jump 链。每个连接最多引用一个 `jumpProfileId`，被引用连接可以继续引用另一连接，从而形成不设置人为最大深度的无环链。扩展自动解析链、补全各跳凭据、使用 `ssh2.Client.forwardOut()` 与 `sock` 逐级建连，并在失败、取消和断开时释放整条隐式链。
+
+**主要功能点**：
+
+- 保存、编辑、导入和导出 SFTP profile 的 jump 引用。
+- 迭代解析任意深度无环链，拒绝自引用、循环、缺失和非 SFTP 引用。
+- 通过独立中间 SSH 客户端逐级 `forwardOut()`，最终建立目标 SFTP 会话。
+- 在 Webview 与原生侧边栏中选择、展示和清除 jump。
+- 保护 SecretStorage 凭据、被引用 profile 和运行时资源生命周期。
+- 保持 FTP/FTPS、直接 SFTP、终端、端口转发和文件操作行为不回归。
+
+**关键文件路径**：
+
+- `docs/prompts/sftp-multi-hop-jump.md`
+- `src/connection/ConnectionManager.ts`
+- `src/connection/JumpChain.ts`
+- `src/remote/RemoteSessionTypes.ts`
+- `src/ssh/SftpSessionManager.ts`
+- `src/panel/webview/markup/Body.ts`
+- `src/panel/webview/scripts/RemoteSearch.ts`
+- `src/panel/webview/scripts/RemoteCommandActions.ts`
+- `src/sidebar/ConnectionDraftStore.ts`
+- `src/sidebar/ItemHelpers.ts`
+- `src/sidebar/SidebarController.ts`
+
+**清单状态说明**：
+
+- `- [ ]` 未开始
+- `- [-]` 进行中
+- `- [x]` 已完成
+- `- [?]` 待确认（发现问题需要用户确认）
+- `- [!]` 阻塞中（依赖其他任务或外部条件）
+
+## 清单执行规则
+
+1. **按优先级执行**：优先完成 P0 任务，确保核心功能可用。
+2. **按依赖关系执行**：严格按任务编号顺序执行，先稳定类型和数据契约，再接入运行时和 UI。
+3. **验证标准**：每个任务完成后执行其“完成标准”中的验证；无法运行外部集成环境时不得伪造结果。
+4. **状态更新**：开始任务时改为 `[-]`；验证成功后改为 `[x]`，追加完成内容和资源列表。
+5. **提交边界**：每个完成任务将代码与对应 checklist 状态一体提交；提交消息遵守 `.cursorrules`，使用 `✨ feat(jump): 完成任务 N：...`。
+6. **连续执行**：当前任务完成并提交后，自动进入下一个无确认依赖的任务，直到全部完成或出现真实阻塞。
+
+## 执行前强制上下文
+
+执行任一任务前，必须先读取并遵守 `概述`、`清单状态说明`、`清单执行规则`、`执行前强制上下文`、`全局规范清单`、`全局确认依赖`、`全局参考` 和当前任务完整任务块；如果当前上下文未包含这些内容，先回读 checklist 文件顶部。
+
+**硬约束**：
+
+- 只处理当前任务声明的目标文件和预期产出；不要顺手修改无关文件、主索引、状态文件或后续任务产物，除非当前任务明确列出。
+- 严格按照当前任务的前置任务、范围说明、规范清单和完成标准执行。
+- 证据不足、路径缺失或需求不明确时，将任务标记为 `[?]` 并写明待确认问题，不要靠猜测补实现。
+- 任务状态为 `[?]` 或任务存在未解决确认依赖时，不得直接执行；必须先提示用户确认具体问题。
+- `.cursorrules` 是用户现有未跟踪文件，只读取并遵守；除非用户另行要求，不把它加入任何提交。
+
+## 全局规范清单
+
+- 仅 SFTP 目标可以配置 jump，且只有已保存的 SFTP profile 可以充当 jump；FTP/FTPS 始终直连。
+- 不定义 jump 最大深度；使用迭代遍历和 `visited` 集合检测自引用及任意长度循环。
+- 统一规定运行时 `jumpChain` 顺序为“最外层、可从本机直连的 jump”到“最靠近最终目标的 jump”。例如 `A -> B -> C` 解析为 `[C, B]`。
+- Webview、日志、普通 profile、备份和 `ActiveConnection` 不得包含密码、私钥内容或私钥口令。
+- 中间 SSH 会话为最终目标专属，不复用可见活动连接，不注册成普通活动连接。
+- 只有链的最外层节点执行本机 TCP 可达性探测；经 `sock` 建立的后续节点不得执行本机直连探测。
+- 缺失、非法或循环引用不得静默退化为直连。
+- 被其他 profile 引用的 jump 不得直接删除或改为 FTP/FTPS。
+- 没有 `jumpProfileId` 的历史 profile 保持直接连接，不进行破坏性迁移。
+- 备份格式升级到版本 3，并继续接受旧版本备份。
+- 所有失败、取消和断开路径都必须释放已创建的客户端、forward stream、监听器和取消订阅。
+- 每项实现完成后先运行差异检查与对应验证，再更新 checklist 状态并提交；不得提交 `.temp/` 执行日志。
+
+## 全局确认依赖
+
+无未解决确认依赖。
+
+## 全局参考
+
+- `docs/prompts/sftp-multi-hop-jump.md` - 业务范围、默认决策、数据契约和验收标准。
+- `.cursorrules` - Git 提交消息与代码/checklist 一体提交规则。
+- `package.json` - 构建脚本与运行时依赖。
+- `package-lock.json` - `ssh2` 当前解析版本与锁定依赖。
+- `src/connection/ConnectionManager.ts` - profile、SecretStorage、备份和连接参数构建。
+- `src/remote/RemoteSessionTypes.ts` - `ConnectOptions` 与 `ActiveConnection`。
+- `src/remote/ConnectionProbe.ts` - 本机 TCP 探测。
+- `src/ssh/SftpSessionManager.ts` - SFTP 建连与资源生命周期。
+- `src/ssh/PortForwardManager.ts` - 已有 `forwardOut()` 与 stream 清理用法。
+- `src/ftp/FtpSessionManager.ts` - FTP/FTPS 不纳入 jump 的依据。
+- `src/panel/RemoteEditPanel.ts` - profile 快照、保存和建连入口。
+- `src/panel/webview/markup/Body.ts` - Webview 连接表单。
+- `src/panel/webview/scripts/StateDialogs.ts` - Webview DOM 引用与状态。
+- `src/panel/webview/scripts/RemoteSearch.ts` - 表单校验、dirty snapshot 与 payload。
+- `src/panel/webview/scripts/RemoteCommandActions.ts` - profile 填充、清空和转换。
+- `src/sidebar/ConnectionDraftStore.ts` - 侧边栏草稿模型。
+- `src/sidebar/ItemHelpers.ts` - 侧边栏连接详情字段。
+- `src/sidebar/SidebarController.ts` - 侧边栏编辑、保存和连接流程。
+
+---
+
+## 核心契约
+
+### 1. 建立 Jump 链类型与无深度上限解析器
+
+- [ ] **类型定义** - Jump 链 - 建立稳定的链方向契约和纯解析逻辑
+  - **执行前上下文**：执行前必须读取并遵守 `执行前强制上下文`；若当前上下文未包含该段，先回读 checklist 文件顶部。
+  - **目标编号**：1
+  - **目标名称**：建立 Jump 链类型与无深度上限解析器
+  - **所属界面组**：无
+  - **导航分组**：无
+  - **目标文件**：
+    - `src/connection/JumpChain.ts` - 新增纯 profile 图解析与校验能力。
+    - `src/remote/RemoteSessionTypes.ts` - 定义运行时 jump hop、chain 与安全展示字段。
+  - **硬边界**：只处理本任务目标文件和预期产出；不修改持久化、会话连接、UI、备份或测试文件。
+  - **确认依赖**：无
+  - **范围说明**：定义可供连接管理器和 SFTP 会话复用的 jump 描述类型；使用迭代遍历从最终目标沿 `jumpProfileId` 收集链，输出固定为最外层到目标最近层；验证自引用、任意长度循环、缺失 profile 和非 SFTP jump，且不设置最大深度。
+  - **优先级**：P0
+  - **前置任务**：无
+  - **参考文档**：
+    - `docs/prompts/sftp-multi-hop-jump.md` - 第 1、4.2、5.1、6、8、9 节。
+  - **参考代码**：
+    - `src/connection/ConnectionManager.ts` - 现有 profile 结构。
+    - `src/remote/RemoteConnectionTypes.ts` - SFTP 类型判断。
+    - `src/remote/RemoteSessionTypes.ts` - 现有连接运行时契约。
+  - **接口依赖**：无
+  - **类型依赖**：
+    - `RemoteConnectionType` - profile 协议类型。
+    - `ConnectOptions` - 最终连接参数。
+  - **规范清单**：
+    - 纯解析模块不得依赖 `vscode` 或 SecretStorage。
+    - 错误必须包含可读链路或相关 profile 名称，便于上层展示。
+    - 不使用递归深度限制或固定层数数组。
+    - 空 jump 表示合法直连并返回空链。
+  - **预期产出**：
+    - `src/connection/JumpChain.ts` - 可复用的迭代链解析器。
+    - `src/remote/RemoteSessionTypes.ts` - 明确的 `JumpConnectOptions` 与安全链摘要契约。
+  - **完成标准**：
+    - 代码可表示任意有限无环 jump 链，输出方向有注释和类型约束。
+    - 自引用、循环、缺失与非 SFTP jump 均产生区分明确的错误。
+    - `npm run compile` 通过。
+
+---
+
+### 2. 扩展连接配置、凭据解析与建连参数
+
+- [ ] **数据与服务** - ConnectionManager - 持久化 jump 并构造完整安全连接链
+  - **执行前上下文**：执行前必须读取并遵守 `执行前强制上下文`；若当前上下文未包含该段，先回读 checklist 文件顶部。
+  - **目标编号**：2
+  - **目标名称**：扩展连接配置、凭据解析与建连参数
+  - **所属界面组**：连接配置
+  - **导航分组**：无
+  - **目标文件**：
+    - `src/connection/ConnectionManager.ts` - 扩展 profile/input、规范化、保存校验和完整 `ConnectOptions` 构建。
+    - `src/connection/JumpChain.ts` - 接入任务 1 类型所需的最小调整。
+    - `src/remote/RemoteSessionTypes.ts` - 接入已解析 chain 所需的最小调整。
+  - **硬边界**：只处理连接配置、凭据和建连参数；本任务不实现备份版本、删除保护、SSH `forwardOut` 运行时或 UI。
+  - **确认依赖**：无
+  - **范围说明**：为 `ConnectionProfile` 与 `ConnectionProfileInput` 增加可选 `jumpProfileId`；历史空值规范为直连；SFTP 保存时基于最终 profile 集合校验引用，FTP/FTPS 保存时清除 jump；`buildConnectOptions()` 解析最外层到最近层 chain，并只在扩展宿主读取每跳 SecretStorage 凭据。缺失 jump 密码或必要口令时使用 VS Code 原生安全输入，取消输入则取消整次建连。
+  - **优先级**：P0
+  - **前置任务**：任务 1
+  - **参考文档**：
+    - `docs/prompts/sftp-multi-hop-jump.md` - 第 4.1、4.3、5、6、8 节。
+  - **参考代码**：
+    - `src/connection/ConnectionManager.ts` - `saveProfile()`、`listProfiles()`、`buildConnectOptions()`、SecretStorage helper。
+    - `src/utils/localPathUtils.ts` - 私钥路径展开参考。
+    - `src/utils/progressUtils.ts` - 取消错误类型。
+  - **接口依赖**：
+    - `vscode.window.showInputBox` - 未保存 jump 密码/口令的安全输入。
+  - **类型依赖**：
+    - `ConnectionProfile`
+    - `ConnectionProfileInput`
+    - `JumpConnectOptions`
+    - `ConnectOptions`
+  - **规范清单**：
+    - profile 快照只暴露 `hasSavedPassword` / `hasSavedPassphrase`，不得附带秘密。
+    - jump chain 中每跳使用自身 host、port、username、authType、key path、keepalive 和秘密。
+    - 快速连接可以引用保存的 jump，但不能成为被引用对象。
+    - 无效引用不得在连接时静默忽略。
+  - **预期产出**：
+    - `src/connection/ConnectionManager.ts` - 完整 jump 持久化与安全 chain 参数构建。
+  - **完成标准**：
+    - 旧 profile 读取后仍为直连，保存/读取 jump ID 可稳定往返。
+    - 多跳链凭据仅存在于扩展宿主内的 `ConnectOptions`。
+    - FTP/FTPS 输入不会产生 jump chain。
+    - 缺失凭据和取消输入具有明确行为。
+    - `npm run compile` 通过。
+
+---
+
+### 3. 完成引用保护与备份版本兼容
+
+- [ ] **数据兼容** - ConnectionManager - 保护反向依赖并升级备份契约
+  - **执行前上下文**：执行前必须读取并遵守 `执行前强制上下文`；若当前上下文未包含该段，先回读 checklist 文件顶部。
+  - **目标编号**：3
+  - **目标名称**：完成引用保护与备份版本兼容
+  - **所属界面组**：连接管理、备份
+  - **导航分组**：无
+  - **目标文件**：
+    - `src/connection/ConnectionManager.ts` - 删除/协议变更保护、备份 v3 导入导出和最终集合校验。
+  - **硬边界**：只处理反向引用和备份契约；不修改 SSH 会话、Webview、侧边栏或测试文件。
+  - **确认依赖**：无
+  - **范围说明**：阻止删除仍被其他 profile 引用的 jump，阻止被引用 SFTP profile 改为 FTP/FTPS；扩展 `RemoteEditBackupConnection`，将备份版本提升到 3；旧版本缺失 jump 时按直连导入；合并和替换均在最终 profile 集合形成后统一校验引用、协议和循环。
+  - **优先级**：P0
+  - **前置任务**：任务 2
+  - **参考文档**：
+    - `docs/prompts/sftp-multi-hop-jump.md` - 第 4.4、5.3、8、9 节。
+  - **参考代码**：
+    - `src/connection/ConnectionManager.ts` - `deleteProfile()`、`buildBackupFile()`、`importBackupFile()`、`normalizeBackupConnections()`。
+  - **接口依赖**：无
+  - **类型依赖**：
+    - `RemoteEditBackupConnection`
+    - `RemoteEditBackupFile`
+    - `ConnectionProfile`
+  - **规范清单**：
+    - 删除或协议变更错误应列出或概述直接依赖 profile。
+    - 导入不得依赖备份数组顺序。
+    - 合并导入依据合并后的最终集合，替换导入依据导入后的最终集合。
+    - 导入无效引用不得自动改为直连。
+  - **预期产出**：
+    - `src/connection/ConnectionManager.ts` - 安全的引用变更与 v3 备份往返。
+  - **完成标准**：
+    - 被引用 jump 的删除和协议降级被明确拒绝。
+    - v3 备份保留 jump，旧备份可作为直连导入。
+    - 合并/替换导入均能发现缺失、非 SFTP 和循环引用。
+    - `npm run compile` 通过。
+
+---
+
+## SSH 运行时
+
+### 4. 实现多级 SSH ForwardOut 会话与清理
+
+- [ ] **运行时** - SSH/SFTP - 逐级建立、取消和释放专属 Jump 链
+  - **执行前上下文**：执行前必须读取并遵守 `执行前强制上下文`；若当前上下文未包含该段，先回读 checklist 文件顶部。
+  - **目标编号**：4
+  - **目标名称**：实现多级 SSH ForwardOut 会话与清理
+  - **所属界面组**：无
+  - **导航分组**：无
+  - **目标文件**：
+    - `package.json` - 将 `ssh2` 声明为直接运行时依赖。
+    - `package-lock.json` - 锁定直接依赖关系。
+    - `src/ssh/SshJumpChain.ts` - 新增可测试的中间 SSH 建连、forward 与资源容器。
+    - `src/ssh/SftpSessionManager.ts` - 接入 jump runtime、最终 `sock`、取消和断开清理。
+    - `src/remote/RemoteSessionTypes.ts` - 运行时资源接入所需的最小类型调整。
+  - **硬边界**：只实现 SSH/SFTP 运行时和依赖；不修改连接 UI、侧边栏、备份或文档。
+  - **确认依赖**：无
+  - **范围说明**：使用原始 `ssh2.Client` 直连最外层 jump，随后逐级 `forwardOut()` 到下一跳并以 stream 作为下一 `Client.connect({ sock })`；最终将最近一跳 stream 作为 `ssh2-sftp-client.connect()` 的 `sock`。直接连接保持现有探测；jump 连接只探测最外层。按最终 connection ID 持有中间客户端和 stream，并覆盖成功、失败、取消、重连、断开和 disconnectAll 清理。
+  - **优先级**：P0
+  - **前置任务**：任务 3
+  - **参考文档**：
+    - `docs/prompts/sftp-multi-hop-jump.md` - 第 4.2、4.5、6、8、9 节。
+  - **参考代码**：
+    - `src/ssh/SftpSessionManager.ts` - 当前直连、认证和关闭逻辑。
+    - `src/ssh/PortForwardManager.ts` - `forwardOut()` 与 stream 生命周期参考。
+    - `src/remote/ConnectionProbe.ts` - 本机 TCP 探测。
+    - `package-lock.json` - 当前 `ssh2@1.17.0` 解析结果。
+  - **接口依赖**：
+    - `ssh2.Client.connect()`
+    - `ssh2.Client.forwardOut()`
+    - `ssh2-sftp-client.connect()`
+  - **类型依赖**：
+    - `JumpConnectOptions`
+    - `ConnectionCancellationToken`
+    - `ActiveConnection`
+  - **规范清单**：
+    - 中间节点不注册活动连接、不运行平台探测、不打开 SFTP。
+    - keepalive、ready timeout 与认证配置应用到每一级 SSH。
+    - 日志和错误指出失败 profile、host 和阶段，且不包含秘密。
+    - 清理应幂等并按目标向外层逆序进行。
+    - 直连 SFTP 路径不得产生行为变化。
+  - **预期产出**：
+    - `src/ssh/SshJumpChain.ts` - 独立 jump runtime。
+    - `src/ssh/SftpSessionManager.ts` - 支持直接和多跳的统一最终 SFTP 会话。
+    - `package.json` / `package-lock.json` - 显式 `ssh2` 依赖。
+  - **完成标准**：
+    - `A -> B -> C` 按 C、B、A 顺序建立 SSH/SFTP，且最终只暴露 A。
+    - 目标和中间 host 不需要本机可达或可解析。
+    - 任一阶段取消或失败均无残留客户端、stream 或活动状态。
+    - 直接连接、终端与已有端口转发仍能取得最终目标底层 SSH client。
+    - `npm install` 不产生意外依赖漂移，`npm run compile` 通过。
+
+---
+
+## 用户界面
+
+### 5. 在 Webview 连接表单接入 Jump 选择
+
+- [ ] **Webview** - 连接配置 - 添加候选过滤、链摘要和 payload 往返
+  - **执行前上下文**：执行前必须读取并遵守 `执行前强制上下文`；若当前上下文未包含该段，先回读 checklist 文件顶部。
+  - **目标编号**：5
+  - **目标名称**：在 Webview 连接表单接入 Jump 选择
+  - **所属界面组**：Remote Edit Webview
+  - **导航分组**：Connection details
+  - **目标文件**：
+    - `src/panel/webview/markup/Body.ts` - 增加 Jump Host 表单控件。
+    - `src/panel/webview/scripts/StateDialogs.ts` - 注册 DOM 引用和交互状态。
+    - `src/panel/webview/scripts/RemoteSearch.ts` - dirty snapshot、校验和 payload 增加 jump。
+    - `src/panel/webview/scripts/RemoteCommandActions.ts` - 候选渲染、profile 填充/清空和类型切换。
+    - `src/panel/webview/scripts/TransferContextActions.ts` - Jump 控件事件与关闭行为。
+    - `src/panel/webview/scripts/LayoutSessions.ts` - 表单输入状态与 profile 列表变化同步。
+    - `src/panel/webview/scripts/TransfersStatus.ts` - 连接中/已连接时的控件锁定。
+    - `src/panel/webview/styles/Styles.ts` - Jump 选择及链摘要样式。
+    - `src/panel/RemoteEditPanel.ts` - 连接/活动状态所需的安全 jump 摘要传递与日志。
+  - **硬边界**：只处理 Webview 入口和安全展示；不修改侧边栏、SSH runtime、备份或测试文件。
+  - **确认依赖**：无
+  - **范围说明**：SFTP 表单显示 Direct/已保存 SFTP profile 候选；排除自身和会形成循环的候选，但允许候选自身包含 jump；显示链摘要；保存与快速连接 payload 只发送 `jumpProfileId`。FTP/FTPS 隐藏或禁用并清空 jump。profile 更新、选择、清空、连接锁定和 dirty comparison 都需保持一致。
+  - **优先级**：P1
+  - **前置任务**：任务 4
+  - **参考文档**：
+    - `docs/prompts/sftp-multi-hop-jump.md` - 第 3.1、4.1、5.2、6、8 节。
+  - **参考代码**：
+    - `src/panel/webview/markup/Body.ts` - 现有连接类型和认证 picker。
+    - `src/panel/webview/scripts/RemoteCommandActions.ts` - profile picker 模式。
+    - `src/panel/webview/scripts/RemoteSearch.ts` - payload 与 snapshot。
+    - `src/panel/RemoteEditPanel.ts` - ProfilesLoaded 和 connect。
+  - **接口依赖**：
+    - `profilesLoaded` Webview 消息。
+    - `saveConnection` / `connect` payload。
+  - **类型依赖**：
+    - `ConnectionProfile.jumpProfileId`
+    - `ActiveConnection.jumpProfileIds`
+  - **规范清单**：
+    - 候选可用性由 UI 提示，但扩展后端保持最终校验。
+    - 不把 chain 的任何凭据发送给 Webview。
+    - Direct 作为明确选项，空值必须稳定往返。
+    - 锁定和 dirty 状态包含 jump，避免误保存或漏提示。
+  - **预期产出**：
+    - Webview 可完整配置并观察 SFTP jump 链。
+  - **完成标准**：
+    - 新建、编辑、快速连接、类型切换和 profile 刷新均正确处理 jump。
+    - 自身、非 SFTP 和循环候选不可选；合法多跳候选可选。
+    - 连接后可看到不含秘密的链路摘要或 via 信息。
+    - `npm run compile` 通过。
+
+---
+
+### 6. 在原生侧边栏接入 Jump 详情与编辑
+
+- [ ] **Sidebar** - 连接配置 - 扩展草稿、详情项和 QuickPick 编辑流程
+  - **执行前上下文**：执行前必须读取并遵守 `执行前强制上下文`；若当前上下文未包含该段，先回读 checklist 文件顶部。
+  - **目标编号**：6
+  - **目标名称**：在原生侧边栏接入 Jump 详情与编辑
+  - **所属界面组**：Native Sidebar
+  - **导航分组**：Saved Connections / Quick Connect
+  - **目标文件**：
+    - `src/sidebar/ConnectionDraftStore.ts` - 草稿、合并、快速连接和类型切换保留 jump。
+    - `src/sidebar/ItemHelpers.ts` - 增加 Jump Host 详情字段和安全显示。
+    - `src/sidebar/Items.ts` - tooltip/详情摘要接入 jump 信息。
+    - `src/sidebar/TreeProviders.ts` - 为保存连接和快速连接呈现 jump 详情。
+    - `src/sidebar/SidebarController.ts` - 使用 QuickPick 选择 Direct 或合法 jump，保存并建连。
+  - **硬边界**：只处理原生侧边栏；不修改 Webview、SSH runtime、备份或测试文件。
+  - **确认依赖**：无
+  - **范围说明**：将 `jumpProfileId` 纳入新建/已有/快速连接草稿与保存 payload；SFTP 详情增加 Jump Host 行，点击后通过 QuickPick 选择 Direct 或合法候选，并展示候选完整链摘要；过滤规则和后端一致；切到 FTP/FTPS 时清空；活动连接 tooltip 可显示 via 链。
+  - **优先级**：P1
+  - **前置任务**：任务 5
+  - **参考文档**：
+    - `docs/prompts/sftp-multi-hop-jump.md` - 第 3.1、4.1、5.2、6、8 节。
+  - **参考代码**：
+    - `src/sidebar/ConnectionDraftStore.ts` - 现有草稿规范化。
+    - `src/sidebar/ItemHelpers.ts` - `ConnectionDetailField` 与详情构建。
+    - `src/sidebar/SidebarController.ts` - 连接字段编辑和保存。
+  - **接口依赖**：
+    - `vscode.window.showQuickPick` - Jump Host 选择。
+  - **类型依赖**：
+    - `ConnectionDetailField`
+    - `ConnectionProfileInput`
+    - `ConnectionProfile`
+  - **规范清单**：
+    - Quick Connect 可以选择保存 profile，但自身不能成为候选。
+    - 未保存草稿不能形成可被其他连接引用的 jump。
+    - 候选标签区分名称与 host，并展示已有链摘要。
+    - 草稿 dirty 状态和保存/放弃行为覆盖 jump 字段。
+  - **预期产出**：
+    - 原生侧边栏可完整配置、保存、查看和使用 jump。
+  - **完成标准**：
+    - 保存连接与 Quick Connect 均能从侧边栏通过合法多跳链连接。
+    - Direct、切换协议、保存、放弃和重载行为一致。
+    - 详情与 tooltip 不泄露凭据。
+    - `npm run compile` 通过。
+
+---
+
+## 验证与交付
+
+### 7. 补充自动验证、回归说明与最终验收
+
+- [ ] **测试与文档** - Jump 链 - 覆盖核心边界并完成全量回归
+  - **执行前上下文**：执行前必须读取并遵守 `执行前强制上下文`；若当前上下文未包含该段，先回读 checklist 文件顶部。
+  - **目标编号**：7
+  - **目标名称**：补充自动验证、回归说明与最终验收
+  - **所属界面组**：无
+  - **导航分组**：无
+  - **目标文件**：
+    - `package.json` - 增加可重复执行的测试脚本或测试入口。
+    - `src/test/JumpChain.test.ts` - 覆盖解析、方向、无限深语义和错误边界。
+    - `src/test/SshJumpChain.test.ts` - 使用受控替身覆盖逐跳顺序、失败、取消和幂等清理。
+    - `README.md` - 说明 SFTP Jump Host 配置、协议限制和多跳行为。
+    - `CHANGELOG.md` - 记录新增能力与兼容边界。
+  - **硬边界**：只增加验证、必要测试入口与用户文档；发现实现缺陷时可回到对应任务目标文件做最小修复，但必须在完成记录中列明。
+  - **确认依赖**：无
+  - **范围说明**：建立不依赖真实生产服务器的自动测试，覆盖空链、单跳、至少三跳、较长无环链、自引用、长循环、缺失/非 SFTP引用、顺序、错误阶段、取消和资源清理；完成 compile/test/diff 检查；记录可复现的隔离网络手工验证步骤，真实环境不可用时明确标记未执行，不虚报成功。
+  - **优先级**：P1
+  - **前置任务**：任务 6
+  - **参考文档**：
+    - `docs/prompts/sftp-multi-hop-jump.md` - 第 8 节验收标准。
+  - **参考代码**：
+    - `src/connection/JumpChain.ts` - 纯解析逻辑。
+    - `src/ssh/SshJumpChain.ts` - SSH runtime 和资源所有权。
+    - `package.json` / `tsconfig.json` - 当前构建方式。
+  - **接口依赖**：
+    - Node.js `node:test` / `assert`，优先避免引入额外测试框架。
+  - **类型依赖**：
+    - `JumpConnectOptions`
+    - Jump runtime 的可注入客户端/stream 边界。
+  - **规范清单**：
+    - 自动测试不得连接真实外部主机或读取真实 SecretStorage。
+    - “无最大深度”通过较长有限链证明算法无固定阈值，并检查源码无深度常量。
+    - 资源清理验证覆盖连接中途失败、用户取消和正常断开。
+    - 文档明确 FTP/FTPS 不支持 jump。
+    - 最终检查不提交 `out/`、`.temp/`、凭据或 `.cursorrules`。
+  - **预期产出**：
+    - `src/test/JumpChain.test.ts` - 图解析回归测试。
+    - `src/test/SshJumpChain.test.ts` - 运行时顺序和清理回归测试。
+    - `README.md` / `CHANGELOG.md` - 用户可见说明。
+  - **完成标准**：
+    - `npm run compile` 通过。
+    - 新增自动测试全部通过并能通过单一 npm script 重复执行。
+    - `git diff --check` 通过，工作区只包含预期文件。
+    - 直接 SFTP 与 FTP/FTPS 路径没有 jump 行为回归。
+    - 手工/隔离拓扑验证结果如实记录；没有可用 SSH 环境时明确列为未执行的外部验证，而不影响自动验证结论。
+
+---
