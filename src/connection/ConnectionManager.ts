@@ -75,6 +75,7 @@ export interface RemoteEditBackupConnection {
   keepAlive: boolean;
   ftpsAllowSelfSignedCertificate?: boolean;
   ftpsCaCertificatePath?: string;
+  jumpProfileId?: string;
   remotePathFavorites?: string[];
   createdAt?: number;
   groupId?: string;
@@ -165,7 +166,7 @@ interface StoredCredentialMap {
 }
 
 const CONFIG_SECTION = 'remoteedit';
-const SUPPORTED_BACKUP_VERSION = 2;
+const SUPPORTED_BACKUP_VERSION = 3;
 const REMOTE_EDIT_SETTING_DEFAULTS = {
   editorTitleButtonPosition: 'hidden',
   statusBarButtonPosition: 'left',
@@ -352,6 +353,16 @@ export class ConnectionManager {
         return { ...profileWithoutGroup, updatedAt: Date.now() };
       });
 
+    if (deleteConnections && removedProfileIds.length) {
+      const removedProfileIdSet = new Set(removedProfileIds);
+      const dependents = nextProfiles.filter(profile => profile.jumpProfileId && removedProfileIdSet.has(profile.jumpProfileId));
+      if (dependents.length) {
+        throw new Error(
+          `Cannot delete connection group '${deletedGroup?.name || id}' with its connections because ${formatDependentProfileNames(dependents)} still use a connection in this group as a jump. Remove those jump references first.`
+        );
+      }
+    }
+
     await this.context.globalState.update(CONNECTION_GROUPS_KEY, normalizeConnectionGroups(nextGroups));
     await this.context.globalState.update(CONNECTIONS_KEY, nextProfiles);
 
@@ -427,6 +438,15 @@ export class ConnectionManager {
       throw new Error('Host is required.');
     }
 
+    if (existing && connectionType !== SFTP_CONNECTION_TYPE) {
+      const dependents = findDirectJumpDependents(profiles, existing.id);
+      if (dependents.length) {
+        throw new Error(
+          `Cannot change connection '${existing.name}' to ${connectionType.toUpperCase()} because it is used as a jump by ${formatDependentProfileNames(dependents)}. Remove those jump references first.`
+        );
+      }
+    }
+
 
     const profile: ConnectionProfile = {
       id: existing?.id || buildProfileId(name, host, username),
@@ -452,9 +472,7 @@ export class ConnectionManager {
       ? profiles.map(item => (item.id === profile.id ? profile : item))
       : [...profiles, profile];
 
-    if (connectionType === SFTP_CONNECTION_TYPE) {
-      resolveJumpProfileChain(profile, nextProfiles);
-    }
+    this.validateProfileJumpReferences(nextProfiles);
 
     await this.context.globalState.update(CONNECTIONS_KEY, nextProfiles);
 
@@ -538,6 +556,16 @@ export class ConnectionManager {
     const timer = createPerformanceTimer();
     const profiles = await this.listProfiles();
     const deletedProfile = profiles.find(profile => profile.id === profileId);
+
+    if (deletedProfile) {
+      const dependents = findDirectJumpDependents(profiles, deletedProfile.id);
+      if (dependents.length) {
+        throw new Error(
+          `Cannot delete connection '${deletedProfile.name}' because it is used as a jump by ${formatDependentProfileNames(dependents)}. Remove those jump references first.`
+        );
+      }
+    }
+
     const nextProfiles = profiles.filter(profile => profile.id !== profileId);
 
     await this.context.globalState.update(CONNECTIONS_KEY, nextProfiles);
@@ -719,7 +747,7 @@ export class ConnectionManager {
 
   async importBackupFile(backup: RemoteEditBackupFile, options: ConnectionBackupImportOptions): Promise<RemoteEditBackupImportResult> {
     const timer = createPerformanceTimer();
-    validateBackupVersion(backup);
+    const backupVersion = validateBackupVersion(backup);
 
     if (!options.includeSettings && !options.includeConnections) {
       throw new Error('Select at least one import option.');
@@ -741,18 +769,17 @@ export class ConnectionManager {
       logViewerFavoritesImported: 0
     };
 
-    if (options.includeSettings && backup.settings && typeof backup.settings === 'object') {
-      await this.importSettings(backup.settings, Array.isArray(backup.settingsKeys) ? backup.settingsKeys : undefined);
-      result.settingsImported = true;
-    }
-
     if (!options.includeConnections) {
+      if (options.includeSettings && backup.settings && typeof backup.settings === 'object') {
+        await this.importSettings(backup.settings, Array.isArray(backup.settingsKeys) ? backup.settingsKeys : undefined);
+        result.settingsImported = true;
+      }
       return result;
     }
 
     const importedGroups = normalizeBackupConnectionGroups(backup.connectionGroups || []);
     const importedGroupIds = new Set(importedGroups.map(group => group.id));
-    const normalizedBackupConnections = this.normalizeBackupConnections(backup.connections || [], options);
+    const normalizedBackupConnections = this.normalizeBackupConnections(backup.connections || [], options, backupVersion);
     const missingGroupReferenceCount = normalizedBackupConnections.filter(profile => profile.groupId && !importedGroupIds.has(profile.groupId)).length;
     const importedConnections = normalizedBackupConnections
       .map(profile => sanitizeProfileGroupId(profile, importedGroupIds));
@@ -773,10 +800,6 @@ export class ConnectionManager {
     let nextProfiles: ConnectionProfile[];
 
     if (options.importMode === 'replace') {
-      for (const profile of existingProfiles) {
-        await this.deleteStoredCredentials(profile.id);
-      }
-
       nextProfiles = importedConnections.map(profile => sanitizeProfileGroupId({
         ...profile,
         createdAt: profile.createdAt || now,
@@ -815,9 +838,9 @@ export class ConnectionManager {
       }
     }
 
-    await this.context.globalState.update(CONNECTION_GROUPS_KEY, nextGroups);
-    await this.context.globalState.update(CONNECTIONS_KEY, nextProfiles);
+    this.validateProfileJumpReferences(nextProfiles);
 
+    let restoredCredentials: StoredCredentialMap | undefined;
     if (options.restoreCredentials) {
       if (!backup.encryptedCredentials) {
         throw new Error('This backup does not contain encrypted passwords/passphrases.');
@@ -828,11 +851,28 @@ export class ConnectionManager {
         throw new Error('Export password is required to restore encrypted passwords/passphrases.');
       }
 
-      const credentials = await decryptCredentials(backup.encryptedCredentials, password);
+      restoredCredentials = await decryptCredentials(backup.encryptedCredentials, password);
+    }
+
+    if (options.includeSettings && backup.settings && typeof backup.settings === 'object') {
+      await this.importSettings(backup.settings, Array.isArray(backup.settingsKeys) ? backup.settingsKeys : undefined);
+      result.settingsImported = true;
+    }
+
+    await this.context.globalState.update(CONNECTION_GROUPS_KEY, nextGroups);
+    await this.context.globalState.update(CONNECTIONS_KEY, nextProfiles);
+
+    if (options.importMode === 'replace') {
+      for (const profile of existingProfiles) {
+        await this.deleteStoredCredentials(profile.id);
+      }
+    }
+
+    if (restoredCredentials) {
       const importedIds = new Set(importedConnections.map(profile => profile.id));
 
       for (const profileId of importedIds) {
-        const profileCredentials = credentials[profileId];
+        const profileCredentials = restoredCredentials[profileId];
         if (!profileCredentials) {
           continue;
         }
@@ -885,6 +925,7 @@ export class ConnectionManager {
       keepAlive: profile.keepAlive !== false,
       ftpsAllowSelfSignedCertificate: profile.connectionType === 'ftps' ? Boolean(profile.ftpsAllowSelfSignedCertificate) : undefined,
       ftpsCaCertificatePath: profile.connectionType === 'ftps' ? String(profile.ftpsCaCertificatePath || '').trim() : undefined,
+      jumpProfileId: profile.connectionType === SFTP_CONNECTION_TYPE ? normalizeJumpProfileId(profile.jumpProfileId) : undefined,
       groupId: profile.groupId || undefined,
       createdAt: profile.createdAt,
       updatedAt: profile.updatedAt
@@ -1068,7 +1109,11 @@ export class ConnectionManager {
     return countCollectionItems(imported);
   }
 
-  private normalizeBackupConnections(connections: RemoteEditBackupConnection[], options: ConnectionBackupImportOptions): ConnectionProfile[] {
+  private normalizeBackupConnections(
+    connections: RemoteEditBackupConnection[],
+    options: ConnectionBackupImportOptions,
+    backupVersion: number
+  ): ConnectionProfile[] {
     const normalizedProfiles: ConnectionProfile[] = [];
     const seenIds = new Set<string>();
 
@@ -1103,6 +1148,7 @@ export class ConnectionManager {
         keepAlive: connection.keepAlive !== false,
         ftpsAllowSelfSignedCertificate: connectionType === 'ftps' ? Boolean(connection.ftpsAllowSelfSignedCertificate) : false,
         ftpsCaCertificatePath: connectionType === 'ftps' ? String(connection.ftpsCaCertificatePath || '').trim() : '',
+        jumpProfileId: backupVersion >= 3 ? normalizeJumpProfileId(connection.jumpProfileId) : undefined,
         favoriteRemotePaths: options.includeFavorites ? normalizeFavoriteRemotePaths(connection.remotePathFavorites || []) : [],
         groupId: String(connection.groupId || '').trim() || undefined,
         createdAt: Number(connection.createdAt || Date.now()),
@@ -1141,6 +1187,22 @@ export class ConnectionManager {
   private async deleteStoredCredentials(profileId: string): Promise<void> {
     await this.context.secrets.delete(secretKey(profileId, 'password'));
     await this.context.secrets.delete(secretKey(profileId, 'passphrase'));
+  }
+
+  private validateProfileJumpReferences(profiles: readonly ConnectionProfile[]): void {
+    for (const profile of profiles) {
+      if (!profile.jumpProfileId) {
+        continue;
+      }
+
+      if (profile.connectionType !== SFTP_CONNECTION_TYPE) {
+        throw new Error(
+          `Connection '${profile.name}' cannot use jump profile '${profile.jumpProfileId}' because ${profile.connectionType.toUpperCase()} connections must connect directly.`
+        );
+      }
+
+      resolveJumpProfileChain(profile, profiles);
+    }
   }
 
   private async updateFavoriteRemotePath(profileId: string, remotePath: string, shouldAdd: boolean): Promise<ConnectionProfile> {
@@ -1792,7 +1854,7 @@ function countCollectionItems(value: unknown): number {
   }, 0);
 }
 
-function validateBackupVersion(backup: RemoteEditBackupFile): void {
+function validateBackupVersion(backup: RemoteEditBackupFile): number {
   const version = Number(backup?.remoteEditExportVersion || 0);
 
   if (!version) {
@@ -1802,6 +1864,20 @@ function validateBackupVersion(backup: RemoteEditBackupFile): void {
   if (version > SUPPORTED_BACKUP_VERSION) {
     throw new Error(`This backup was created by a newer Remote Edit export format (version ${version}).`);
   }
+
+  return version;
+}
+
+function findDirectJumpDependents(profiles: readonly ConnectionProfile[], profileId: string): ConnectionProfile[] {
+  return profiles.filter(profile => normalizeJumpProfileId(profile.jumpProfileId) === profileId);
+}
+
+function formatDependentProfileNames(profiles: readonly ConnectionProfile[]): string {
+  const visibleNames = profiles.slice(0, 5).map(profile => `'${profile.name}'`);
+  const remaining = profiles.length - visibleNames.length;
+  return remaining > 0
+    ? `${visibleNames.join(', ')} and ${remaining} more connection${remaining === 1 ? '' : 's'}`
+    : visibleNames.join(', ');
 }
 
 function isSupportedBackupConnection(connection: RemoteEditBackupConnection): boolean {
