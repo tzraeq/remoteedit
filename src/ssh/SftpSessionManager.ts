@@ -1,8 +1,6 @@
-import * as fs from 'fs/promises';
 import * as vscode from 'vscode';
 import SftpClient from 'ssh2-sftp-client';
 import type { Client } from 'ssh2';
-import { expandHomePath } from '../utils/localPathUtils';
 import { getBooleanSetting, getNumberSetting } from '../utils/settingsUtils';
 import { buildRemoteTempPath, buildSudoErrorMessage, shellQuote } from '../utils/shellUtils';
 import { appendDebugLog, appendPerformanceLog, createPerformanceTimer } from '../utils/outputLogger';
@@ -17,6 +15,7 @@ import { buildOwnerGroupSuggestionCommand, buildPermissionString, buildPrincipal
 import { buildControlledRemoteCommandScript, buildRemoteCommandDisplayScript, createRemoteCommandDisplayCallbacks, getPotentialRemoteProcessPidMarkerSuffixLength, escapeRegExp } from './RemoteCommandDisplay';
 import { buildSftpCopyFileCommand, buildSftpCreateArchiveCommand, buildSftpMd5ChecksumAttempts, buildSftpSha256ChecksumAttempts, extractSftpChecksum, type SftpChecksumCommandAttempt } from './ArchiveChecksumUtils';
 import { buildWindowsChecksumCommand, buildWindowsPowerShellCommand, buildWindowsSetLocationScript, createPowerShellCliXmlStreamSanitizer, isWindowsPowerShellCommand, quotePowerShellLiteral, sanitizePowerShellCliXml } from './WindowsPowerShellUtils';
+import { resolveSshAuthentication, SshJumpChain, type SshAuthenticationTarget, type SshJumpRuntimeSettings } from './SshJumpChain';
 import type { RemoteSessionManager, RemoteListDirectoryOptions, RemoteOwnerGroupSuggestions, RemotePrincipalSuggestion } from '../remote/RemoteSessionManager';
 import type {
   ActiveConnection,
@@ -112,6 +111,8 @@ export class SftpSessionManager implements RemoteSessionManager {
 
   private readonly sessions = new Map<string, SftpClient>();
   private readonly connections = new Map<string, ActiveConnection>();
+  private readonly jumpChains = new Map<string, SshJumpChain>();
+  private readonly finalClientCloseListeners = new Map<string, { client: Client; chain: SshJumpChain; listener: () => void }>();
   private readonly ownerNameCaches = new Map<string, Map<string, string>>();
   private readonly groupNameCaches = new Map<string, Map<string, string>>();
   private readonly ownerGroupSuggestionCaches = new Map<string, { expiresAt: number; suggestions: RemoteOwnerGroupSuggestions }>();
@@ -129,145 +130,232 @@ export class SftpSessionManager implements RemoteSessionManager {
 
     await this.disconnect(options.connectionId);
 
-    if (cancellationToken?.isCancellationRequested) {
-      throw new Error('Connection cancelled.');
-    }
+    this.throwIfConnectionCancelled(cancellationToken);
 
     const readyTimeout = getNumberSetting('sshReadyTimeout', 30000, 1000, 300000);
-    const client = new SftpClient(`remoteedit-${options.connectionId}`);
-    const config: Record<string, unknown> = {
-      host: options.host,
-      port: options.port,
-      username: options.username,
-      readyTimeout
+    const jumpRuntimeSettings: SshJumpRuntimeSettings = {
+      readyTimeout,
+      keepAliveInterval: getNumberSetting('sshKeepAliveInterval', 30000, 1000, 300000),
+      keepAliveCountMax: getNumberSetting('sshKeepAliveCountMax', 3, 1, 20)
     };
-
-    if (options.keepAlive !== false) {
-      config.keepaliveInterval = getNumberSetting('sshKeepAliveInterval', 30000, 1000, 300000);
-      config.keepaliveCountMax = getNumberSetting('sshKeepAliveCountMax', 3, 1, 20);
-    }
-
-    if (options.authType === 'privateKey') {
-      if (!options.privateKeyPath) {
-        throw new Error('Private key path is required for private key authentication.');
-      }
-
-      config.privateKey = await fs.readFile(expandHomePath(options.privateKeyPath), 'utf8');
-
-      if (options.passphrase) {
-        config.passphrase = options.passphrase;
-      }
-    } else {
-      if (!options.password) {
-        throw new Error('Password is required for password authentication.');
-      }
-
-      config.password = options.password;
-    }
-
-    const cancellationSubscription = cancellationToken?.onCancellationRequested(() => {
-      void this.closeClientForCancellation(client);
-    });
-
-    try {
-      await assertTcpConnectionReachable({
-        host: options.host,
-        port: options.port,
-        timeoutMs: readyTimeout,
-        protocolLabel: 'ssh',
-        cancellationToken
-      });
-
-      await client.connect(config as any);
-
-      if (cancellationToken?.isCancellationRequested) {
-        await this.closeClientForCancellation(client);
-        throw new Error('Connection cancelled.');
-      }
-    } catch (error) {
-      cancellationSubscription?.dispose();
-      await this.closeClientForCancellation(client);
-
-      if (cancellationToken?.isCancellationRequested) {
-        throw new Error('Connection cancelled.');
-      }
-
-      throw normalizeRemoteConnectError(error, {
-        host: options.host,
-        port: options.port,
-        timeoutMs: readyTimeout,
-        protocolLabel: 'ssh'
-      });
-    }
-
-    const platformProbe = await detectRemotePlatform(client, this.output);
-    const remotePlatform = platformProbe.platform;
-    const remoteShell = platformProbe.shell;
-    this.remotePlatforms.set(options.connectionId, remotePlatform);
-    this.remoteShells.set(options.connectionId, remoteShell);
-
-    const homePath = await this.safeCwd(client, remotePlatform);
-
-    if (cancellationToken?.isCancellationRequested) {
-      cancellationSubscription?.dispose();
-      await this.closeClientForCancellation(client);
-      throw new Error('Connection cancelled.');
-    }
-
-    const requestedStartPath = normalizeRemotePathForPlatform(options.startPath || homePath || '/', remotePlatform);
-    const startPath = await this.resolveStartPath(client, options.connectionId, requestedStartPath, homePath, remotePlatform);
-
-    if (cancellationToken?.isCancellationRequested) {
-      cancellationSubscription?.dispose();
-      await this.closeClientForCancellation(client);
-      throw new Error('Connection cancelled.');
-    }
-
-    cancellationSubscription?.dispose();
-    this.sessions.set(options.connectionId, client);
-
-    const connection: ActiveConnection = {
-      id: options.connectionId,
-      connectionType: SFTP_CONNECTION_TYPE,
+    const client = new SftpClient(`remoteedit-${options.connectionId}`);
+    const target: SshAuthenticationTarget = {
+      kind: 'target',
+      profileId: options.connectionId,
       name: options.name || `${options.username}@${options.host}`,
       host: options.host,
       port: options.port,
       username: options.username,
       authType: options.authType,
+      password: options.password,
       privateKeyPath: options.privateKeyPath,
-      startPath,
-      keepAlive: options.keepAlive !== false,
-      isQuickConnect: Boolean(options.isQuickConnect),
-      remotePlatform,
-      remoteShell,
-      capabilities: getRemoteCapabilities(SFTP_CONNECTION_TYPE, remotePlatform)
+      passphrase: options.passphrase,
+      keepAlive: options.keepAlive
     };
+    const jumpOptions = options.jumpChain || [];
 
-    this.connections.set(options.connectionId, connection);
-    return connection;
+    if (options.jumpProfileId && jumpOptions.length === 0) {
+      throw new Error(`Target "${target.name}" (${target.host}:${target.port}) has a jump reference but no resolved jump chain.`);
+    }
+
+    let jumpChain: SshJumpChain | undefined;
+    let cleanupPromise: Promise<void> | undefined;
+    const cleanupAttempt = (): Promise<void> => {
+      cleanupPromise = cleanupPromise || (async () => {
+        await this.closeClientForCancellation(client);
+        await jumpChain?.dispose();
+      })();
+      return cleanupPromise;
+    };
+    const cancellationSubscription = cancellationToken?.onCancellationRequested(() => void cleanupAttempt());
+
+    try {
+      const authentication = await resolveSshAuthentication(target, cancellationToken, {
+        promptPassphrase: (promptTarget, token) => this.promptForPrivateKeyPassphrase(promptTarget, token)
+      });
+      this.throwIfConnectionCancelled(cancellationToken);
+      const config: Parameters<SftpClient['connect']>[0] = {
+        host: options.host,
+        port: options.port,
+        username: options.username,
+        readyTimeout,
+        ...authentication
+      };
+
+      if (options.keepAlive !== false) {
+        config.keepaliveInterval = jumpRuntimeSettings.keepAliveInterval;
+        config.keepaliveCountMax = jumpRuntimeSettings.keepAliveCountMax;
+      }
+
+      if (jumpOptions.length > 0) {
+        jumpChain = new SshJumpChain(jumpRuntimeSettings, {
+          promptPassphrase: (promptTarget, token) => this.promptForPrivateKeyPassphrase(promptTarget, token)
+        });
+        config.sock = await jumpChain.open(jumpOptions, {
+          kind: 'target',
+          name: target.name,
+          host: target.host,
+          port: target.port
+        }, cancellationToken);
+      } else {
+        try {
+          await assertTcpConnectionReachable({
+            host: options.host,
+            port: options.port,
+            timeoutMs: readyTimeout,
+            protocolLabel: 'ssh',
+            cancellationToken
+          });
+        } catch (error) {
+          this.throwIfConnectionCancelled(cancellationToken);
+          throw normalizeRemoteConnectError(error, {
+            host: options.host,
+            port: options.port,
+            timeoutMs: readyTimeout,
+            protocolLabel: 'ssh'
+          });
+        }
+      }
+
+      this.throwIfConnectionCancelled(cancellationToken);
+
+      try {
+        await client.connect(config);
+      } catch (error) {
+        this.throwIfConnectionCancelled(cancellationToken);
+
+        if (jumpChain) {
+          const message = error instanceof Error ? error.message : String(error || 'Unknown error');
+          throw new Error(`Target "${target.name}" (${target.host}:${target.port}) failed while establishing the final SFTP connection: ${message}`);
+        }
+
+        throw normalizeRemoteConnectError(error, {
+          host: options.host,
+          port: options.port,
+          timeoutMs: readyTimeout,
+          protocolLabel: 'ssh'
+        });
+      }
+
+      this.throwIfConnectionCancelled(cancellationToken);
+
+      const platformProbe = await detectRemotePlatform(client, this.output);
+      const remotePlatform = platformProbe.platform;
+      const remoteShell = platformProbe.shell;
+      this.remotePlatforms.set(options.connectionId, remotePlatform);
+      this.remoteShells.set(options.connectionId, remoteShell);
+
+      const homePath = await this.safeCwd(client, remotePlatform);
+      this.throwIfConnectionCancelled(cancellationToken);
+
+      const requestedStartPath = normalizeRemotePathForPlatform(options.startPath || homePath || '/', remotePlatform);
+      const startPath = await this.resolveStartPath(client, options.connectionId, requestedStartPath, homePath, remotePlatform);
+      this.throwIfConnectionCancelled(cancellationToken);
+
+      this.sessions.set(options.connectionId, client);
+
+      if (jumpChain) {
+        this.jumpChains.set(options.connectionId, jumpChain);
+        this.attachFinalClientCloseListener(options.connectionId, client, jumpChain);
+      }
+
+      const connection: ActiveConnection = {
+        id: options.connectionId,
+        connectionType: SFTP_CONNECTION_TYPE,
+        name: target.name,
+        host: options.host,
+        port: options.port,
+        username: options.username,
+        authType: options.authType,
+        privateKeyPath: options.privateKeyPath,
+        startPath,
+        keepAlive: options.keepAlive !== false,
+        isQuickConnect: Boolean(options.isQuickConnect),
+        ...(jumpChain ? {
+          jumpProfileId: options.jumpProfileId || jumpOptions[jumpOptions.length - 1].profileId,
+          jumpProfileIds: jumpOptions.map(hop => hop.profileId),
+          jumpProfileNames: jumpOptions.map(hop => hop.name)
+        } : {}),
+        remotePlatform,
+        remoteShell,
+        capabilities: getRemoteCapabilities(SFTP_CONNECTION_TYPE, remotePlatform)
+      };
+
+      this.connections.set(options.connectionId, connection);
+      return connection;
+    } catch (error) {
+      await cleanupAttempt();
+      this.sessions.delete(options.connectionId);
+      this.detachFinalClientCloseListener(options.connectionId);
+      this.jumpChains.delete(options.connectionId);
+      this.clearConnectionState(options.connectionId);
+
+      if (cancellationToken?.isCancellationRequested || error instanceof RemoteEditOperationCancelledError) {
+        throw new RemoteEditOperationCancelledError('Connection cancelled.');
+      }
+
+      throw error;
+    } finally {
+      cancellationSubscription?.dispose();
+    }
+  }
+
+
+  private throwIfConnectionCancelled(cancellationToken?: ConnectionCancellationToken): void {
+    if (cancellationToken?.isCancellationRequested) {
+      throw new RemoteEditOperationCancelledError('Connection cancelled.');
+    }
+  }
+
+  private async promptForPrivateKeyPassphrase(
+    target: SshAuthenticationTarget,
+    cancellationToken?: ConnectionCancellationToken
+  ): Promise<string | undefined> {
+    return await vscode.window.showInputBox({
+      title: `Passphrase required for "${target.name}"`,
+      prompt: `Enter the private key passphrase for ${target.username}@${target.host}:${target.port}.`,
+      password: true,
+      ignoreFocusOut: true,
+      validateInput: value => value ? undefined : 'Passphrase is required.'
+    }, cancellationToken as vscode.CancellationToken | undefined);
   }
 
 
   private async closeClientForCancellation(client: SftpClient): Promise<void> {
+    let endPromise: Promise<unknown>;
+
     try {
-      await client.end();
+      endPromise = Promise.resolve(client.end()).catch(() => undefined);
     } catch {
-      try {
-        (client as any).client?.destroy?.();
-      } catch {
-        // Ignore cancellation cleanup errors.
-      }
+      endPromise = Promise.resolve();
     }
+
+    try {
+      (client as unknown as { client?: Client }).client?.destroy();
+    } catch {
+      // Ignore forced cancellation cleanup errors.
+    }
+
+    await endPromise;
   }
 
   async disconnect(connectionId: string): Promise<void> {
+    this.detachFinalClientCloseListener(connectionId);
     const client = this.sessions.get(connectionId);
 
-    if (client) {
-      await this.closeClientForDisconnect(client, connectionId);
+    try {
+      if (client) {
+        await this.closeClientForDisconnect(client, connectionId);
+      }
+    } finally {
+      await this.closeJumpChain(connectionId);
     }
 
     this.sessions.delete(connectionId);
+    this.clearConnectionState(connectionId);
+  }
+
+  private clearConnectionState(connectionId: string): void {
     this.connections.delete(connectionId);
     this.ownerNameCaches.delete(connectionId);
     this.groupNameCaches.delete(connectionId);
@@ -314,8 +402,56 @@ export class SftpSessionManager implements RemoteSessionManager {
   }
 
   async disconnectAll(): Promise<void> {
-    const ids = Array.from(this.sessions.keys());
+    const ids = Array.from(new Set([
+      ...this.sessions.keys(),
+      ...this.jumpChains.keys(),
+      ...this.finalClientCloseListeners.keys()
+    ]));
     await Promise.all(ids.map(id => this.disconnect(id)));
+  }
+
+  private async closeJumpChain(connectionId: string): Promise<void> {
+    const chain = this.jumpChains.get(connectionId);
+    this.jumpChains.delete(connectionId);
+    await chain?.dispose();
+  }
+
+  private attachFinalClientCloseListener(connectionId: string, client: SftpClient, chain: SshJumpChain): void {
+    this.detachFinalClientCloseListener(connectionId);
+    const sshClient = (client as unknown as { client?: Client }).client;
+
+    if (!sshClient) {
+      return;
+    }
+
+    const listener = (): void => {
+      const current = this.finalClientCloseListeners.get(connectionId);
+
+      if (!current || current.client !== sshClient || current.chain !== chain) {
+        return;
+      }
+
+      this.finalClientCloseListeners.delete(connectionId);
+
+      if (this.jumpChains.get(connectionId) === chain) {
+        this.jumpChains.delete(connectionId);
+        void chain.dispose();
+      }
+    };
+
+    this.finalClientCloseListeners.set(connectionId, { client: sshClient, chain, listener });
+    sshClient.once('close', listener);
+  }
+
+  private detachFinalClientCloseListener(connectionId: string): void {
+    const current = this.finalClientCloseListeners.get(connectionId);
+
+    if (!current) {
+      return;
+    }
+
+    current.client.removeListener('close', current.listener);
+    this.finalClientCloseListeners.delete(connectionId);
   }
 
   getConnection(connectionId: string): ActiveConnection | undefined {
@@ -2686,6 +2822,4 @@ ${result.stdout.toString('utf8')}`.trim();
     });
   }
 }
-
-
 

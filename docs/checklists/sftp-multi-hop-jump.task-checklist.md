@@ -250,7 +250,7 @@
 
 ### 4. 实现多级 SSH ForwardOut 会话与清理
 
-- [ ] **运行时** - SSH/SFTP - 逐级建立、取消和释放专属 Jump 链
+- [x] **运行时** - SSH/SFTP - 逐级建立、取消和释放专属 Jump 链
   - **执行前上下文**：执行前必须读取并遵守 `执行前强制上下文`；若当前上下文未包含该段，先回读 checklist 文件顶部。
   - **目标编号**：4
   - **目标名称**：实现多级 SSH ForwardOut 会话与清理
@@ -298,6 +298,18 @@
     - 任一阶段取消或失败均无残留客户端、stream 或活动状态。
     - 直接连接、终端与已有端口转发仍能取得最终目标底层 SSH client。
     - `npm install` 不产生意外依赖漂移，`npm run compile` 通过。
+  - **完成时间**：2026-08-27 09:23 CST
+  - **实际产出**：
+    - `src/ssh/SshJumpChain.ts` - 新增独立、可注入测试依赖的多级 SSH runtime；仅探测最外层，使用 `forwardOut()` direct-tcpip 内部流逐级传递 `sock`，不监听本地端口、不创建可配置端口映射；支持逐跳认证、加密私钥口令提示、取消及严格逆序幂等清理。
+    - `src/ssh/SftpSessionManager.ts` - 最终 SFTP 接入最近跳 stream，按最终 connection ID 持有隐藏链；覆盖初始化失败、取消、重连、远端关闭、单次断开和全部断开的资源释放；安全填充 jump 摘要，并保持最终目标 raw SSH client 的终端/端口转发访问路径。
+    - `package.json` / `package-lock.json` - 增加直接 `ssh2@^1.17.0` 运行时依赖，复用既有锁定的 `ssh2@1.17.0`。
+  - **资源列表**：`src/ssh/SshJumpChain.ts`、`src/ssh/SftpSessionManager.ts`、`package.json`、`package-lock.json`。
+  - **验证结果**：
+    - ✓ `npm run compile`、`git diff --check` 通过；`npm install --package-lock-only --ignore-scripts` 未产生额外漂移，依赖树只有一个去重后的 `ssh2@1.17.0`。
+    - ✓ fake-client 隔离验证覆盖 C→B→A 建连顺序、前一跳 stream 作为下一跳 `sock`、仅 C 本机探测、逐跳 keepalive/认证、最终流交付和目标侧向外层严格逆序清理。
+    - ✓ 覆盖中间连接失败、转发期间取消、迟到 stream、重复 dispose、错误不含凭据、缺口令按需提示与非法 key 不提示；无客户端、stream、监听器或取消订阅残留。
+    - ✓ 64 跳有限无环链迭代验证通过；源码扫描确认新 runtime 不调用 `createServer` / `listen`，不引用端口映射配置或 `PortForwardManager`。
+    - △ 当前工作区没有可用的多主机隔离 SSH 拓扑，因此未声称真实网络集成已执行；任务 7 保留外部拓扑验收入口。
 
 ---
 
