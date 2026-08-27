@@ -43,7 +43,7 @@ export class JumpChainValidationError extends Error {
  * For `A -> B -> C`, resolving A returns `[C, B]`.
  */
 export function resolveJumpProfileChain<T extends JumpProfileDescriptor>(
-  target: T,
+  target: JumpProfileDescriptor,
   profiles: readonly T[]
 ): T[] {
   const targetId = normalizeProfileId(target.id);
@@ -144,7 +144,7 @@ function createSelfReferenceError(profile: JumpProfileDescriptor, pathProfileIds
 function formatProfilePath<T extends JumpProfileDescriptor>(
   profileIds: readonly string[],
   profilesById: ReadonlyMap<string, T>,
-  target: T
+  target: JumpProfileDescriptor
 ): string {
   const targetId = normalizeProfileId(target.id);
   return profileIds

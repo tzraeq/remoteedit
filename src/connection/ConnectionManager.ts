@@ -1,8 +1,11 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import type { ConnectOptions } from '../remote/RemoteSessionManager';
+import type { JumpConnectOptions } from '../remote/RemoteSessionTypes';
 import { appendDebugLog, appendPerformanceLog, createPerformanceTimer } from '../utils/outputLogger';
+import { RemoteEditOperationCancelledError } from '../utils/progressUtils';
 import { DEFAULT_CONNECTION_TYPE, getDefaultPortForConnectionType, isKnownConnectionType, normalizeConnectionType, SFTP_CONNECTION_TYPE, type RemoteConnectionType } from '../remote/RemoteConnectionTypes';
+import { resolveJumpProfileChain, type JumpProfileDescriptor } from './JumpChain';
 
 export type AuthType = 'password' | 'privateKey';
 
@@ -21,6 +24,7 @@ export interface ConnectionProfile {
   keepAlive: boolean;
   ftpsAllowSelfSignedCertificate?: boolean;
   ftpsCaCertificatePath?: string;
+  jumpProfileId?: string;
   favoriteRemotePaths?: string[];
   groupId?: string;
   createdAt: number;
@@ -220,6 +224,7 @@ export interface ConnectionProfileInput {
   groupId?: string;
   ftpsAllowSelfSignedCertificate?: boolean;
   ftpsCaCertificatePath?: string;
+  jumpProfileId?: string;
 }
 
 const CONNECTIONS_KEY = 'remoteedit.connectionProfiles';
@@ -409,6 +414,9 @@ export class ConnectionManager {
     const keepAlive = typeof input.keepAlive === 'boolean' ? input.keepAlive : existing?.keepAlive !== false;
     const ftpsAllowSelfSignedCertificate = Boolean(input.ftpsAllowSelfSignedCertificate ?? existing?.ftpsAllowSelfSignedCertificate ?? false);
     const ftpsCaCertificatePath = String(input.ftpsCaCertificatePath ?? existing?.ftpsCaCertificatePath ?? '').trim();
+    const jumpProfileId = connectionType === SFTP_CONNECTION_TYPE
+      ? normalizeJumpProfileId(input.jumpProfileId !== undefined ? input.jumpProfileId : existing?.jumpProfileId)
+      : undefined;
     const groupId = await this.normalizeProfileGroupId(input.groupId ?? existing?.groupId);
 
     if (!name) {
@@ -433,6 +441,7 @@ export class ConnectionManager {
       keepAlive,
       ftpsAllowSelfSignedCertificate: connectionType === 'ftps' ? ftpsAllowSelfSignedCertificate : false,
       ftpsCaCertificatePath: connectionType === 'ftps' ? ftpsCaCertificatePath : '',
+      jumpProfileId,
       favoriteRemotePaths: normalizeFavoriteRemotePaths(existing?.favoriteRemotePaths || []),
       groupId,
       createdAt: existing?.createdAt || now,
@@ -442,6 +451,10 @@ export class ConnectionManager {
     const nextProfiles = existing
       ? profiles.map(item => (item.id === profile.id ? profile : item))
       : [...profiles, profile];
+
+    if (connectionType === SFTP_CONNECTION_TYPE) {
+      resolveJumpProfileChain(profile, nextProfiles);
+    }
 
     await this.context.globalState.update(CONNECTIONS_KEY, nextProfiles);
 
@@ -1180,7 +1193,8 @@ export class ConnectionManager {
   }
 
   async buildConnectOptions(input: ConnectionProfileInput): Promise<ConnectOptions> {
-    const profile = input.id ? await this.getProfile(input.id) : undefined;
+    const profiles = await this.listProfiles();
+    const profile = input.id ? profiles.find(item => item.id === input.id) : undefined;
 
     const host = String(input.host || profile?.host || '').trim();
     const username = String(input.username || profile?.username || '').trim();
@@ -1194,6 +1208,9 @@ export class ConnectionManager {
     const keepAlive = typeof input.keepAlive === 'boolean' ? input.keepAlive : profile?.keepAlive !== false;
     const ftpsAllowSelfSignedCertificate = Boolean(input.ftpsAllowSelfSignedCertificate ?? profile?.ftpsAllowSelfSignedCertificate ?? false);
     const ftpsCaCertificatePath = String(input.ftpsCaCertificatePath ?? profile?.ftpsCaCertificatePath ?? '').trim();
+    const jumpProfileId = connectionType === SFTP_CONNECTION_TYPE
+      ? normalizeJumpProfileId(input.jumpProfileId !== undefined ? input.jumpProfileId : profile?.jumpProfileId)
+      : undefined;
 
     if (!host) {
       throw new Error('Host is required.');
@@ -1222,6 +1239,24 @@ export class ConnectionManager {
       throw new Error('Private key path is required for private key authentication.');
     }
 
+    let jumpChain: JumpConnectOptions[] | undefined;
+    if (jumpProfileId) {
+      const target: JumpProfileDescriptor = {
+        id: connectionId,
+        name,
+        connectionType,
+        jumpProfileId,
+        host,
+        port
+      };
+      const jumpProfiles = resolveJumpProfileChain(target, profiles);
+      jumpChain = [];
+
+      for (const jumpProfile of jumpProfiles) {
+        jumpChain.push(await this.buildJumpConnectOptions(jumpProfile));
+      }
+    }
+
     validateFtpsCaCertificateRequirement(connectionType, ftpsAllowSelfSignedCertificate, ftpsCaCertificatePath);
 
     return {
@@ -1239,7 +1274,78 @@ export class ConnectionManager {
       keepAlive,
       ftpsAllowSelfSignedCertificate: connectionType === 'ftps' ? ftpsAllowSelfSignedCertificate : false,
       ftpsCaCertificatePath: connectionType === 'ftps' ? ftpsCaCertificatePath : undefined,
-      isQuickConnect: !profile?.id
+      isQuickConnect: !profile?.id,
+      ...(jumpProfileId && jumpChain ? { jumpProfileId, jumpChain } : {})
+    };
+  }
+
+
+  private async buildJumpConnectOptions(profile: ConnectionProfile): Promise<JumpConnectOptions> {
+    const host = String(profile.host || '').trim();
+    const port = normalizePort(profile.port);
+    const username = String(profile.username || '').trim();
+    const privateKeyPath = String(profile.privateKeyPath || '').trim();
+
+    if (!host) {
+      throw new Error(`Host is required for jump profile '${profile.name}'.`);
+    }
+
+    if (!username) {
+      throw new Error(`Username is required for jump profile '${profile.name}'.`);
+    }
+
+    if (profile.authType === 'password') {
+      let password = await this.context.secrets.get(secretKey(profile.id, 'password')) || '';
+
+      if (!password) {
+        const promptedPassword = await vscode.window.showInputBox({
+          title: `Password required for jump "${profile.name}"`,
+          prompt: `Enter the password for ${username}@${host}:${port}.`,
+          password: true,
+          ignoreFocusOut: true,
+          validateInput: value => value ? undefined : 'Password is required.'
+        });
+
+        if (promptedPassword === undefined) {
+          throw new RemoteEditOperationCancelledError('Connection cancelled.');
+        }
+
+        password = promptedPassword;
+      }
+
+      if (!password) {
+        throw new Error(`Password is required for jump profile '${profile.name}'.`);
+      }
+
+      return {
+        profileId: profile.id,
+        name: profile.name,
+        connectionType: 'sftp',
+        host,
+        port,
+        username,
+        authType: 'password',
+        password,
+        keepAlive: profile.keepAlive !== false
+      };
+    }
+
+    if (!privateKeyPath) {
+      throw new Error(`Private key path is required for jump profile '${profile.name}'.`);
+    }
+
+    const passphrase = await this.context.secrets.get(secretKey(profile.id, 'passphrase')) || '';
+    return {
+      profileId: profile.id,
+      name: profile.name,
+      connectionType: 'sftp',
+      host,
+      port,
+      username,
+      authType: 'privateKey',
+      privateKeyPath,
+      passphrase: passphrase || undefined,
+      keepAlive: profile.keepAlive !== false
     };
   }
 
@@ -1289,15 +1395,17 @@ export class ConnectionManager {
   }
 
   private normalizeStoredProfile(profile: ConnectionProfile): ConnectionProfile {
+    const connectionType = normalizeConnectionType(profile.connectionType);
     return {
       ...profile,
-      connectionType: normalizeConnectionType(profile.connectionType),
+      connectionType,
       port: normalizePort(profile.port || getDefaultPortForConnectionType(profile.connectionType)),
       authType: normalizeAuthTypeForConnection(profile.authType, profile.connectionType),
       startPath: profile.startPath || '',
       keepAlive: profile.keepAlive !== false,
-      ftpsAllowSelfSignedCertificate: normalizeConnectionType(profile.connectionType) === 'ftps' ? Boolean(profile.ftpsAllowSelfSignedCertificate) : false,
-      ftpsCaCertificatePath: normalizeConnectionType(profile.connectionType) === 'ftps' ? String(profile.ftpsCaCertificatePath || '').trim() : '',
+      ftpsAllowSelfSignedCertificate: connectionType === 'ftps' ? Boolean(profile.ftpsAllowSelfSignedCertificate) : false,
+      ftpsCaCertificatePath: connectionType === 'ftps' ? String(profile.ftpsCaCertificatePath || '').trim() : '',
+      jumpProfileId: connectionType === SFTP_CONNECTION_TYPE ? normalizeJumpProfileId(profile.jumpProfileId) : undefined,
       favoriteRemotePaths: normalizeFavoriteRemotePaths(profile.favoriteRemotePaths || []),
       groupId: String(profile.groupId || '').trim() || undefined,
       createdAt: Number(profile.createdAt || Date.now()),
@@ -1476,6 +1584,14 @@ function normalizePort(value: number | string | undefined): number {
   }
 
   return port;
+}
+
+function normalizeJumpProfileId(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  return value.trim() || undefined;
 }
 
 function normalizeAuthType(value: string | undefined): AuthType {

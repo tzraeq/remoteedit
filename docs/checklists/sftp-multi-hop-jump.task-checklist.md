@@ -147,7 +147,7 @@
 
 ### 2. 扩展连接配置、凭据解析与建连参数
 
-- [ ] **数据与服务** - ConnectionManager - 持久化 jump 并构造完整安全连接链
+- [x] **数据与服务** - ConnectionManager - 持久化 jump 并构造完整安全连接链
   - **执行前上下文**：执行前必须读取并遵守 `执行前强制上下文`；若当前上下文未包含该段，先回读 checklist 文件顶部。
   - **目标编号**：2
   - **目标名称**：扩展连接配置、凭据解析与建连参数
@@ -188,6 +188,14 @@
     - FTP/FTPS 输入不会产生 jump chain。
     - 缺失凭据和取消输入具有明确行为。
     - `npm run compile` 通过。
+  - **完成时间**：2026-08-27 08:44 CST
+  - **实际产出**：
+    - `src/connection/ConnectionManager.ts` - 增加 SFTP-only jump ID 归一化与往返、保存前最终图校验、saved/quick 目标链解析、逐跳 SecretStorage 补全及缺失密码安全提示。
+    - `src/connection/JumpChain.ts` - 允许轻量 quick target 作为解析起点，同时保持返回的已保存 profile 强类型。
+  - **验证结果**：
+    - ✓ `npm run compile` 与 `git diff --check` 成功。
+    - ✓ 隔离验证覆盖三跳顺序、旧值直连、FTP 强制直连、quick 引用、秘密不进入 profile、一次性密码不落盘、取消输入及无效保存不写入。
+    - ✓ 未保存私钥口令保持未填充，由任务 4 加载密钥确认确实加密后再安全提示，避免未加密私钥误弹窗。
 
 ---
 
