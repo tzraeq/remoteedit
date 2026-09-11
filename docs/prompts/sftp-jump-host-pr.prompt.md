@@ -47,6 +47,7 @@
 ## 4. 功能范围与保留契约
 
 - 已保存的 SFTP 连接与 Quick Connect 可选择 Direct 或已保存 SFTP profile；临时连接不成为候选。每个 profile 保留至多一个 `jumpProfileId`，允许有限无环多跳，不设人为深度上限。[REF-001][REF-003]
+- **VS Code 交互式新建连接向导必须提供 Jump Host 选择步骤。** 用户在本轮补充中明确要求新建时让用户选择 jumpserver；该要求覆盖 `remoteedit.sidebar.newConnection` → `SidebarController.addConnection()`，不能仅以已有连接详情编辑或 Webview 表单覆盖代替。当前 dev 已有此步骤，本次保留并明确验收。[REF-017]
 - 宿主先完成全链结构校验，再按最外层到最终目标建立；每个目标拥有独立隐藏链。中间层用 `ssh2.Client.forwardOut()` 返回的 channel 作为下一 SSH 的 `sock`，最终用 `ssh2-sftp-client` 建立 SFTP。只有最外层从本地做 TCP 探测。[REF-004][REF-005]
 - 不创建 Jump 本地监听或可配置端口映射，不要求预先打开可见 Jump 会话；FTP/FTPS 维持直连。终端、普通端口转发、远程命令和文件操作继续使用最终目标会话。[REF-001][REF-012]
 - 本次后续变更覆盖上述功能对应的清理、取消反馈、引用、备份、凭据边界、测试与说明。具体修复限定在已核实缺口和能够复现的风险；不重新设计认证方式、链路复用或备份加密体系。
@@ -86,6 +87,10 @@ SftpSessionManager 应在首个异步建连工作前登记当前尝试，登记�
 - 删除组但保留连接：引用继续有效。连组内连接一起删除：只要组外剩余连接引用待删除集合就拒绝；若引用双方都在同一删除集合，允许整组删除。
 - SFTP 输入省略 `jumpProfileId` 表示沿用已保存选择；显式空字符串表示切回 Direct。FTP/FTPS 保存和普通连接参数构建清除该字段，维持既有协议行为；v3 备份中的非 SFTP Jump 引用按导入校验拒绝。这两个入口的处理差异应分别验证，不将它们混写为“一律报错”。[REF-008][REF-009]
 - 缺失或循环的 SFTP 引用明确拒绝，不能静默变成 Direct。候选列表更新后两套 UI 都保持 ID 语义与宿主一致。[REF-003][REF-013]
+
+VS Code 交互式新建 SFTP 连接时，沿用当前向导顺序：名称/分组 → 协议 → 主机/端口/用户名 → **Jump Host 选择** → 后续认证及其他配置 → 保存。Jump Host 使用原生 QuickPick，默认聚焦 Direct，用户可以选择已保存且整条链合法的 SFTP profile；候选可以自身包含 Jump，并显示名称、endpoint 和路线帮助辨认。保存时将所选 ID 作为 `jumpProfileId` 交给宿主校验，保存后的连接详情应显示对应路线。[REF-017]
+
+没有合法 Jump 候选时仍显示 Direct，允许完成直连配置。用户在 Jump 选择步骤按 Esc，应退出本次新建，不创建该连接或写入其凭据；Direct 的空串与取消的 undefined 必须区分。FTP/FTPS 新建跳过该步骤，保持直连。上述新建入口是本次用户明确补充的验收范围，不是待开发的新网络能力。[REF-017]
 
 ### 5.4 备份与兼容语义
 
@@ -135,6 +140,7 @@ PR 使用英文，说明触发场景与可观察行为，链接 #36，按维护�
 | 重命名、删除、协议切换、删组保留连接、组内整体删除及存在组外依赖 | ID 稳定；保护只阻止会破坏剩余图的操作；拒绝前零写入 | ConnectionManager 公共方法行为测试 |
 | v1/v2 导入；v3 打乱数组顺序后往返；merge 引用现存 Jump；replace 缺少 Jump | 结果符合第 5.4 节版本与最终集合语义，非法图无写入 | 版本 fixtures + 结果图断言 + mutation spy |
 | v3 含密/无密备份；错误密码；不恢复凭据；同名不同 ID profiles | 仅显式选择时加密导出与恢复，秘密按 ID 配对；解密失败无副作用 | 调用真实 buildBackupFile/importBackupFile，使用 synthetic credentials 和真实加解密 |
+| VS Code 交互式新建 SFTP：选择 Direct、选择已含 Jump 的合法 profile、没有合法候选、在选择处 Esc；新建 FTP/FTPS | SFTP 在用户名之后提供原生 Jump 选择；所选 ID 经 saveProfile 保存且详情路线正确；无候选仍可选 Direct；Esc 不创建连接/凭据；FTP/FTPS 不出现 Jump 步骤 | 驱动真实 addConnection 流程的原生输入/QuickPick 替身，检查步骤、保存 payload 与写入记录；在 VS Code 实际运行新建命令冒烟 |
 | 双 UI 保存/编辑/Quick Connect、Direct 清除与 FTP/FTPS 切换 | 候选、dirty 状态、payload 与宿主一致；保存跳转字段只传 ID，协议隔离不回归 | 小范围自动行为验证 + 双 UI 手工记录 |
 | 隔离网络 Local→D→C→B→A | 本机不能直连 C/B/A，A 主机名只由 B 解析；目录浏览、读写、上传下载成功，断链/取消后服务器侧会话关闭 | 使用可销毁主机或容器，记录路由/访问限制与服务端连接证据 |
 | 最终目标的 SSH Terminal、既有端口转发、远程命令和文件操作；直连 FTP/FTPS | 使用正确最终会话；既有操作可用且不误入 Jump runtime | 针对已有功能做冒烟，不扩成全产品测试矩阵 |
@@ -305,6 +311,16 @@ PR 使用英文，说明触发场景与可观察行为，链接 #36，按维护�
   - 适用范围与限制：本轮未制作 VSIX，未声称已观察到实际发布包内容。
   - 核实状态：已核实规则，包内容待执行时复核。
 
+- REF-017
+  - 来源：`src/sidebar/SidebarController.ts`；用户 2026-09-11 本轮补充。
+  - 用途：明确 VS Code 交互式新建的 Jump Host 选择入口及保存链路。
+  - 参考范围：211 行命令注册；537–543 行加载候选；575–642 行协议、目标输入与 Jump 步骤；770–800 行新建及保存；2679–2727 行 picker。
+  - 稳定锚点：`remoteedit.sidebar.newConnection`、`private async addConnection()`、`promptSidebarJumpProfileId`、`jumpProfileId = selectedJumpProfileId`。
+  - 原文事实：新建 SFTP 在用户名输入之后调用 Jump picker，undefined 直接退出，合法选择保存为 jumpProfileId；组及连接写入在后续保存阶段；picker 含 Direct 与合法的已保存 SFTP 候选，无候选时仍含 Direct。
+  - 推导判断：当前实现已有入口，应显式纳入流程和验收，避免仅验证编辑入口而漏掉交互式新建。
+  - 适用范围与限制：用户确认的是新建时提供选择；本轮没有在 VS Code UI 实际操作该向导，也未把源码核对当作交互测试通过。
+  - 核实状态：已核实源码与用户要求，交互验收待执行。
+
 ## 8. 默认决策与执行假设
 
 - **单个 PR，目标上游 main。** 依据维护者明确回复；后续在独立分支整合，fork dev 保留，避免为缩小审查差异删除本地历史资料。
@@ -330,5 +346,7 @@ PR 使用英文，说明触发场景与可观察行为，链接 #36，按维护�
 状态：**待 review**。
 
 本轮已依据 issue、上游贡献指南、实际 dev 源码和依赖完成方案分析，并重跑现有 15 项测试。可供 review 的内容是五项关注点的处理方式、明确缺口、待复现风险、备份语义、生命周期通知与验收边界。用户授权的是 prepare，尚未确认本文件全部设计，也未授权本轮进入 create/execute 或提交 PR。
+
+用户随后明确补充“通过 VS Code 交互式新建时，jumpserver 应让用户选择”。已将该局部要求写入范围、向导流程、单独验收场景和 REF-017；源码核实其在现有 dev 中已接入。本次补充未改变其他方案决策，也不代表整份方案已获确认。
 
 后续 create 应将“当前已正确、需要证明”的行为与“需要修复”的缺口区分，保留 REF 的读取边界及执行条件；不得把历史完成清单重新置为待办，也不得将本方案的验收标准抄成已通过结果。运行时风险经复现若不成立，就保留相关回归证据，不为符合推测而修改正常代码。
