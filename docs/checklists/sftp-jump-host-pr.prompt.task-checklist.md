@@ -1,0 +1,712 @@
+# SFTP Jump Host 上游 PR 准备 - Checklist
+
+## 概述
+
+保留现有 SFTP 多跳能力，在 fork 的 dev 修正连接生命周期和取消反馈，补齐凭据、引用、备份及双 UI 的行为证据；dev 验证通过后，移植到基于最新上游 main 的干净分支，再提交一个 PR。
+
+- 仓库根目录：`E:\workspace\vscode\remoteedit`；fork：`https://github.com/tzraeq/remoteedit.git`；上游：`https://github.com/josegrabelha/remoteedit`。
+- 方案来源：`docs/prompts/sftp-jump-host-pr.prompt.md` 第 1–10 节，仅用于溯源；执行契约已物化到本清单，不要求回读 prompt。
+- 编制依据：2026-09-11 用户明确调用 create，并确认“先在 dev 开发和验证，通过后干净分支移植，再提交 PR”。交互式新建 SFTP 必须让用户选择 Jump Host，是用户另行明确的要求。
+- 基线：当前 dev HEAD 为 `db981eb`，工作区干净；相对实现基线 `4c83099` 只有 PR prompt 文档新增，源码 REF 行号仍适用。此前实际执行 npm test 为 15/15，包含编译；当前清单各项新增验收尚未执行。
+- 任务阶段：1–7 在 dev 开发/补测/整理文档；8 在 dev 完成综合验收；9 在干净分支移植并重新验证；10 提交 PR。先开发后移植是用户确认的执行顺序。
+- 拆分 review：**待 review**。本轮授权生成清单，不自动开始实现；后续明确执行本清单或指定任务即可提供相应执行授权，无需重复确认已经确定的方案。
+- 本清单为新需求的执行快照，保留原 `docs/checklists/sftp-multi-hop-jump.task-checklist.md` 的完成历史。
+
+## 清单状态说明
+
+- `- [ ]` 未开始；前置任务和复核条件满足后可执行。
+- `- [-]` 进行中；按用户要求恢复，不重复启动。
+- `- [x]` 已完成；保留产出和验证证据，不静默重做。
+- `- [?]` 待确认；关联问题解决前不得执行。
+- `- [!]` 阻塞；依赖或外部条件未满足。
+
+## 清单执行规则
+
+执行前完成拆分 review，或取得用户明确覆盖当前清单/任务的执行授权。用户已确认的 dev→验证→移植→PR 顺序和交互式新建要求直接适用，不重复设置审批。
+
+1. 按前置依赖执行；未指定业务优先级。每次只处理当前任务，连续执行时逐项验证、回写，不并列修改多个未收敛任务。
+2. 依赖就绪必须核对产物和本任务所需的交付结论，不能只凭前置任务的勾选或历史摘要。
+3. 完成时记录实际目标文件、验证命令/环境/结果、必要交付结论和限制。交付结论写在生产者任务末尾，使用“任务编号 + 交付结论 + 主题”定位。
+4. 任务 8 未通过时，9 和 10 不启动。隔离环境或交互工具不可用属于执行条件阻塞，不能将未验证写成通过；不阻止无关的 dev 修复继续。
+5. 任务 9 只移植已验证内容。移植后因上游差异修改的行为必须重新验证；方案/契约改变则回 prepare/create 更新，而不是在移植中隐式扩大功能。
+6. 任务 10 的 PR 提交与任务 9 的分支推送分别属于对应任务的操作范围；只有后续执行授权覆盖该任务时才实施。本次 create 不推送、不创建 PR。
+
+## 执行前强制上下文
+
+- 读取本清单前七个全局段落、全局参考和当前任务完整块。原 prompt 与其他任务正文不自动成为必读；只核对本任务声明的依赖产物和必要完成记录。
+- 执行依据为明确事实、方案、约束、参考范围及实际工作树；用户及项目指令继续适用。
+- REF 按行号分段读取；位置漂移先搜索稳定锚点。任务预期造成的源码变化按依赖契约核对，不将旧行号当成最新事实，也不把参考路径当作全文读取要求。
+- 仅修改当前任务目标文件的声明部分。清单当前任务的状态、产出、交付结论、验证、遗留问题和已核实定位信息属于必要回写。
+- 前置任务预期新建的文件在完成后按路径/符号核对，不为尚未存在的产物填写虚假行号。其必要语义已写入消费者的依赖契约。
+- UTF-8 严格解码，新建文本无 BOM。PowerShell 读写显式 UTF-8；向原生进程传递可能含非 ASCII 的文本时设置 UTF-8 管道编码。若需 Python 工具，按项目及已适用技能选择解释器并配置 UTF-8。
+- 范围内局部组织方式可由执行者判断；证据冲突、方案/公开契约变化、需扩大允许文件集或验收失败时记录影响，停止受影响任务并回到相应阶段修订。
+- 验证与短结论持久化在本清单对应任务记录，不能仅留在聊天或恢复缓存。
+
+## 全局规范清单
+
+- 1–8 在 dev 执行，9 才建立干净移植分支；保留 fork 已发布历史及规划记录。源码基线变化时仅核对实际变动范围。
+- 既定能力：已保存 SFTP 与 Quick Connect 可选择 Direct/合法已保存 SFTP；有限无环多跳，无人为深度上限；宿主最终校验；稳定 profile ID 引用。
+- 传输保持每目标私有链、forwardOut channel→下一 SSH sock、只有最外层本地探测、最终目标注册一次；不创建 Jump 本地监听/可配置映射或要求可见预连接。FTP/FTPS 保持直连。
+- 只做已有契约的修正与证明；已正确代码保持不动。尚未复现的时序风险先建立行为场景，不为迎合推测修改正常逻辑。
+- 使用 synthetic credentials 与测试资源；秘密仅在宿主当前尝试和 SecretStorage/显式加密块中流转。不会序列化整个含密 ConnectOptions 到日志或 outbound 消息。
+- 新增测试纳入真实 `npm test`，沿用 Node 内置测试工具；必要时最小测试接入，不建立通用框架。行为保证以方法调用/事件/可观察结果证明，不以源码正则代替运行时验证。
+- 每项只回写实际验证结果；15 项旧测试通过不代表新增管理器、双 UI、隔离网络或移植后验收已完成。
+
+## 全局确认依赖
+
+无未解决确认依赖。运行环境、隔离拓扑、VS Code 交互工具、GitHub 身份及最新 refs 是对应任务的执行复核条件，未评估时任务保持未开始，不预填为已通过或另设人类审批。
+
+## 全局参考
+
+无。各任务所需证据按用途列在任务内；不将整份 prompt 或全部 REF 提升为所有任务的必读资源。
+
+## 任务清单
+
+### 1. 使隐藏 SSH 链在异步终止时可靠释放
+
+- [ ] **运行时与回归** - 明确隐藏 SSH client/channel 的终止时序并修正可复现缺口
+  - **执行前上下文**：读取全局契约及本任务完整块。
+  - **目标文件**：
+    - `src/ssh/SshJumpChain.ts` — 修改资源跟踪、dispose、connect/forward 终止路径；认证与 hop 顺序只做必要衔接。
+    - `src/test/SshJumpChain.test.ts` — 修改受控资源的异步终止语义，补充故障/取消/清理行为。
+  - **范围说明**：验证 destroy 后延迟 error/close、forward 请求中 transport close、取消后迟到 stream、重复 dispose；按观察到的真实依赖行为修正，不把单纯调用 destroy 当作 socket 已关闭。
+  - **硬边界**：不通过永久保留空 error listener 掩盖泄漏；ssh2 close 本身会清理挂起 channel 请求，不能仅因缺少显式 close listener 就假定 forward 必挂起。
+  - **执行依据事实**：当前 dispose 逆序调用 end/destroy 后立即移除 error listener；替身仅计数。ssh2 会转发 socket error，并在 close 时清理请求（REF-004、REF-011、REF-015）。
+  - **规范清单**：
+    - 顺序为最近层流/client 向最外层，幂等释放；每阶段业务监听与 token 订阅退出时释放。
+    - 防止未处理异常的 error 监听保留至资源终止收敛，随后移除；已关闭、未启动资源同样能结束。
+    - 待处理 open/forward 必须成功或拒绝收敛；迟到 channel 立即释放，失败包含当前节点与阶段。
+    - 保留逐跳认证/keepalive、只探测最外层及无本地监听契约。
+    - 执行前复核 lockfile 安装的依赖版本和 npm test；环境不具备时记录失败原因，不预设真实网络已验证。
+  - **允许的实现判断**：私有终止 helper 和有限状态组织可自行选择；若实测需要 owner 故障通知，可在现有链内增加最小内部回调，并在交付结论写明触发及释放契约。
+  - **优先级**：未指定，按依赖执行。
+  - **前置任务**：无
+  - **依赖产物与契约**：无。
+  - **下游交付**：任务 2 消费 open/dispose 的收敛和事件语义；任务 7 消费经验证的生命周期说明与限制。
+  - **确认依赖**：无。
+  - **参考文档**：无。
+  - **参考代码**：
+    - REF-004
+      - 来源：`src/ssh/SshJumpChain.ts`。
+      - 用途：隐藏链建立、终止与认证时序。
+      - 参考范围：117–179 行认证；201–291 行建链；293–343 行资源销毁；345–397 行 SSH 阶段监听；400–465 行 forward 与迟到流。
+      - 稳定锚点：`resolveSshAuthentication`、`SshJumpChain.open`、`dispose`、`connectClient`、`forwardTo`。
+      - 原文事实：只探测最外层，通过 forwardOut/sock 接力；dispose 逆序调用 end/destroy 后移除 error listener；forward 取消后销毁迟到流。
+      - 推导判断：所有权方向可保留；异步关闭收敛需要更接近真实依赖的验证。
+      - 适用范围与限制：源码能证明调用顺序，不能单独证明 OS socket 已关闭或延迟 error 一定出现。
+      - 核实状态：已核实源码；延迟事件风险待复现。
+    - REF-011
+      - 来源：`src/test/SshJumpChain.test.ts`；`package.json`。
+      - 用途：建立异步终止测试并维持测试命令入口。
+      - 参考范围：SshJumpChain.test 59–160 行替身；297–479 行顺序、失败与取消；529–548 行架构断言；package.json 2201–2217 行脚本及依赖。
+      - 稳定锚点：`ControlledStream`、`ControlledClient`、`opens three hidden SSH hops in order and disposes streams/clients in reverse once`、`scripts.test`。
+      - 原文事实：既有资源替身主要记录调用；npm test 编译后显式运行两个测试文件。
+      - 推导判断：新增测试必须接入单一命令，并覆盖真实管理器行为；通过的基线不能替代集成证据。
+      - 适用范围与限制：本轮已跑 15/15，但未完成此方案新增验收。
+      - 核实状态：已核实源码并实际运行基线。
+    - REF-015
+      - 来源：`node_modules/ssh2/lib/client.js`（由 lockfile 安装）。
+      - 用途：校准 Client error/close 和挂起 channel 请求的真实语义。
+      - 参考范围：797–829 行。
+      - 稳定锚点：`Socket error:`、`Notify outstanding channel requests of disconnection`。
+      - 原文事实：socket error 转发为 Client error；socket close 清理挂起 channel 请求。
+      - 推导判断：不要凭简化替身断言 forward 必挂起；测试需模拟延迟终止事件。
+      - 适用范围与限制：以本轮 lockfile 实际版本为准；这是依赖源码事实，不是完整网络验证。
+      - 核实状态：已核实安装后的依赖源码。
+  - **预期产出**：
+    - `SshJumpChain.open/dispose` 与对应测试 — 在真实依赖语义下正确收敛。
+    - 本任务 **交付结论：隐藏链终止契约** — 记录已复现/未复现风险、监听移除时点、Promise 收敛、是否新增内部通知及其符号、测试位置和版本限制。
+  - **完成标准**：
+    - 延迟 error/close、pending forward 关闭、迟到 stream、重复 dispose 场景无未处理异常；监听/订阅及测试计时器终止后无残留。
+    - 既有三跳顺序、错误阶段及只探测最外层场景保持通过；npm test 通过。
+    - 交付结论能供任务 2 判断如何移交/终止资源；风险未复现时可交付无需修改的结论，但必须有对应测试证据。
+
+### 2. 闭合 SFTP 连接尝试、活动会话与 Router 的生命周期
+
+- [ ] **运行时与集成回归** - 使取消、disconnectAll、远端关闭和重连保持资源与活动状态一致
+  - **执行前上下文**：读取全局契约及本任务完整块。
+  - **目标文件**：
+    - `src/ssh/SftpSessionManager.ts` — 连接尝试登记、身份校验、资源移交、有界终止、远端关闭与活动状态。
+    - `src/remote/RemoteSessionManager.ts` — 最小可选内部关闭通知契约。
+    - `src/remote/RemoteSessionRouter.ts` — 建立中断开、route 移除、关闭通知订阅与连接变化事件。
+    - `src/test/SftpSessionManager.test.ts`、`src/test/RemoteSessionRouter.test.ts` — 新建真实管理器行为测试。
+    - `src/test/helpers/SftpSessionHarness.ts` — 两个测试确有共享需要时新建受控客户端/平台探测替身，限本生命周期。
+    - `package.json` — 将本任务测试纳入 test。
+  - **范围说明**：在第一个异步建连工作前登记拥有取消/关闭能力的当前尝试，初始化成功后移交活动会话。建立中断开、失败、取消、远端关闭统一清理；旧尝试的迟到结果不能改动同 ID 新会话。
+  - **硬边界**：不可只删 map 而让建连 Promise 继续注册；不新增用户可配置清理超时；内部通知不携带秘密或 runtime 链。
+  - **执行依据事实**：当前 session/jump map 在初始化后才注册；disconnectAll 不枚举建立中资源；final close 只清理 Jump 记录；正常 disconnect 已有超时策略，取消路径 await end；Router 已有 UI 连接变化事件但无 SFTP 远端关闭订阅（REF-005、REF-014）。
+  - **规范清单**：
+    - 各失败阶段覆盖 outer probe、SSH/forward、最终 SFTP、平台探测、cwd/startPath；Promise 与资源收敛，取消不注册活动连接。
+    - 最终 SFTP→隐藏链逆序释放；正常断开和取消采用有界关闭，优先复用 SSH_DISCONNECT_TIMEOUT_MS，finally 保证链清理。
+    - 清理 sessions、connections、对应缓存及 attempts；校验 client/attempt 身份，保持目标间私有链隔离。
+    - 拟议可选 `onDidCloseConnection: Event<string>` 在清理当前会话后发出；Router 移除匹配 route，复用 onDidChangeConnections，显式/远端关闭去重。实际符号可按现有风格微调，语义固定。
+    - 以真实 manager 方法验证直接 SFTP 密码/私钥/需口令路径；Router 使用可注入 manager 验证 FTP/FTPS 不进入 Jump SFTP 分支。
+    - ActiveConnection 白名单只含 Jump ID/名称，不含秘密。
+  - **允许的实现判断**：可选择最小 attempt 容器、私有 factory 与测试替身；新增接口限定内部生命周期，不能借此创建通用连接框架。
+  - **优先级**：未指定，按依赖执行。
+  - **前置任务**：1
+  - **依赖产物与契约**：任务 1 产生 `src/ssh/SshJumpChain.ts` 的 open/dispose 行为及“交付结论：隐藏链终止契约”。核对其终止信号、owner 通知（若有）、迟到事件和监听释放边界，并运行该文件测试；源码及实际测试符合契约后就绪，不要求回读任务 1 的全部设计。
+  - **下游交付**：任务 3 消费已稳定的 active snapshot/认证与取消路径；任务 7 消费 session→Router→UI 通知说明及验证证据。
+  - **确认依赖**：无。
+  - **参考文档**：无。
+  - **参考代码**：
+    - REF-005
+      - 来源：`src/ssh/SftpSessionManager.ts`。
+      - 用途：最终 SFTP 的资源移交、取消、断开与活动状态。
+      - 参考范围：109–124 行 maps；126–170 行尝试创建；172–260 行认证到初始化及注册；262–300 行活动信息/失败清理；310–340 行输入与取消关闭；342–455 行断开及 final close；457–463 行活动查询。
+      - 稳定锚点：`connect`、`cleanupAttempt`、`closeClientForCancellation`、`disconnectAll`、`attachFinalClientCloseListener`、`listConnections`。
+      - 原文事实：注册发生在初始化完成后；取消关闭 await end；正常关闭已有有界策略；final close 仅移除链相关记录。
+      - 推导判断：建立中资源需可取消；远端关闭需同步 session/connection 状态；关闭策略应统一。
+      - 适用范围与限制：当前分析针对 Jump 相关生命周期；直接认证 helper 的变更仍需兼容回归。
+      - 核实状态：已核实源码；end 不收敛的具体运行场景待测试。
+    - REF-014
+      - 来源：`src/remote/RemoteSessionRouter.ts`；`src/remote/RemoteSessionManager.ts`；Panel/Sidebar 的连接变化订阅。
+      - 用途：远端关闭到活动状态/UI 的通知契约。
+      - 参考范围：Router 20–53 行事件与构造、56–106 行断开/查询；RemoteSessionManager 75–81 行连接接口；Panel 587–591 行订阅；Sidebar 110–126 行订阅与刷新。
+      - 稳定锚点：`onDidChangeConnectionsEmitter`、`sessionRoutes`、`RemoteSessionManager`、`connectionChangeEvent`。
+      - 原文事实：Router 维护 route 并主动发出连接变化事件；现有接口未提供 SFTP 远端关闭通知；UI 已订阅 Router 的变化。
+      - 推导判断：需要最小内部关闭通知，使清理结果复用现有 UI 刷新链路。
+      - 适用范围与限制：拟议事件只传连接身份，不改变 FTP 功能或构造新的通用事件总线。
+      - 核实状态：已核实。
+    - REF-015
+      - 来源：`node_modules/ssh2-sftp-client/src/index.js`（由 lockfile 安装）。
+      - 用途：验证有界最终客户端关闭策略。
+      - 参考范围：1454–1485 行。
+      - 稳定锚点：`End the SFTP connection`、`end()`。
+      - 原文事实：有活动 sftp 时 end 等待 close，无活动连接则直接 resolve。
+      - 推导判断：测试覆盖迟到 close/不收敛 end，不能让中间链无限等待。
+      - 适用范围与限制：以本轮 lockfile 实际版本为准；这是依赖源码事实，不是完整网络验证。
+      - 核实状态：已核实安装后的依赖源码。
+    - REF-011
+      - 来源：`package.json`；`src/test/SshJumpChain.test.ts`。
+      - 用途：接入管理器行为测试，替换协议隔离的纯源码证明。
+      - 参考范围：package.json 2201–2217 行；SshJumpChain.test 529–548 行。
+      - 稳定锚点：`scripts.test`、`source contract keeps Jump internal while Direct SFTP and FTP/FTPS remain separate`。
+      - 原文事实：命令显式列两个文件；现有协议隔离只做源码正则。
+      - 推导判断：新增测试必须接入单一命令，并覆盖真实管理器行为；通过的基线不能替代集成证据。
+      - 适用范围与限制：本轮已跑 15/15，但未完成此方案新增验收。
+      - 核实状态：已核实源码并实际运行基线。
+  - **预期产出**：
+    - 管理器生命周期修正与两份已接入 npm test 的行为测试。
+    - 本任务 **交付结论：SFTP 生命周期与通知** — 实际通知符号、attempt/active 移交边界、旧事件隔离、超时行为、各阶段验证位置及剩余限制。
+  - **完成标准**：
+    - 建立期间显式 disconnect/disconnectAll、最终握手/初始化取消均收敛，未留下活动/pending 状态或迟到注册。
+    - 远端 close 后 manager 查询无旧连接，Router route 移除并通知；旧客户端关闭不删除新会话。
+    - 两个目标共用一个 Jump profile 时各有私有资源；关闭一个不影响另一个。
+    - 迟到 close/不收敛 end 的受控场景在既定边界结束；全套 npm test 通过，直接 SFTP 与协议路由行为有动态断言。
+
+### 3. 验证逐跳凭据隔离并修正输入取消反馈
+
+- [ ] **凭据与双 UI 反馈** - 保持每跳取密身份和临时输入边界，取消显示为 canceled
+  - **执行前上下文**：读取全局契约及本任务完整块。
+  - **目标文件**：
+    - `src/connection/ConnectionManager.ts` — 限逐跳取密、输入、保存偏好及安全快照的契约修正。
+    - `src/panel/RemoteEditPanel.ts` — 前置 buildConnectOptions catch、pending/busy 复位和 outbound 快照。
+    - `src/sidebar/SidebarController.ts` — connectWithPayload 前置取消分类与活动状态复位。
+    - `src/test/ConnectionManagerCredentials.test.ts`、`src/test/ConnectionCredentialUi.test.ts` — 新建公共凭据方法和实际 UI 宿主入口测试。
+    - `src/test/helpers/ConnectionManagerHarness.ts` — 新建内存 globalState/secrets、输入和写入/日志观察工具，供任务 4、5 复用。
+    - `src/test/helpers/ConnectionUiHarness.ts` — 需要共享时新建最小 Panel/Sidebar 原生输入与消息替身，供任务 6 复用。
+    - `package.json` — 纳入新增测试。
+  - **范围说明**：使用不同 synthetic secrets 调用真实 ConnectionManager 和 UI 宿主入口；已保存密码/口令按 ID 使用，临时 Jump 密码仅用于当前尝试。前置密码框取消进入 canceled 分支。
+  - **硬边界**：不把目标既有密码输入改成新交互；不因取消反馈修复将所有密码准备搬入网络阶段；不自动保存 Jump 临时输入。
+  - **执行依据事实**：每跳 SecretStorage key 已按 ID 隔离，缺密码原生提示并抛取消异常；两套 UI 在创建进度源前调用 buildConnectOptions，前置 catch 按普通错误处理（REF-006、REF-007）。
+  - **规范清单**：
+    - Jump 密码仍在网络前提示，Esc 取消整次尝试，不触发网络、不显示 Connection failed；Panel/Sidebar 清除关联 pending/busy/活动状态。
+    - 运行时私钥口令依照需要提示并使用连接 token；目标已有保存偏好保持不变。
+    - 捕获 globalState、profiles、pending/active outbound 消息和日志，验证不含各跳密码/口令/私钥内容；runtime 允许持有当前秘密。
+    - route 只显示名称，错误节点/阶段可含 host/port；禁止打印完整配置。
+    - harness 调用真实方法，模块替身使用后恢复；共享工具限本清单消费者所需的 get/update/store/delete、输入队列和观察记录。
+  - **允许的实现判断**：异常分类优先沿用已有取消异常判断；可在现有方法内组织小 helper。harness API 可按 Node 测试风格命名，并记录导出符号及构造方法。
+  - **优先级**：未指定，按依赖执行。
+  - **前置任务**：2
+  - **依赖产物与契约**：任务 2 的 SftpSessionManager active snapshot 与“交付结论：SFTP 生命周期与通知”提供稳定的取消/快照边界；核对其字段白名单和对应测试通过，再与 UI 输出观察衔接。
+  - **下游交付**：任务 4 和 5 消费内存 ConnectionManagerHarness 的真实方法实例与写入/secret 观察接口；任务 6 消费取消分类和 UI harness（若创建）；任务 7 消费凭据安全及取消行为结论。
+  - **确认依赖**：无。
+  - **参考文档**：无。
+  - **参考代码**：
+    - REF-006
+      - 来源：`src/connection/ConnectionManager.ts`；`src/remote/RemoteSessionTypes.ts`。
+      - 用途：凭据与 runtime/持久化边界。
+      - 参考范围：ConnectionManager 389–407 行 profile 快照；1257–1341 行连接参数；1345–1411 行逐跳取密与输入；1415–1446 行保存偏好；1961–1963 行 secret key。RemoteSessionTypes 7–45 行 runtime 链及 token。
+      - 稳定锚点：`listProfiles`、`buildConnectOptions`、`buildJumpConnectOptions`、`applyCredentialPreferences`、`secretKey`、`JumpConnectOptions`。
+      - 原文事实：每跳按 ID 读 SecretStorage；Jump 缺失密码原生提示且取消抛取消异常；该输入没有 token 参数；临时 Jump 输入不写入 secrets。
+      - 推导判断：测试必须走真实 ConnectionManager，覆盖读取身份与未自动保存，而不仅测试 SSH config。
+      - 适用范围与限制：含密 runtime 对象允许存在于宿主当前尝试中；禁止向普通持久化或 outbound 消息扩散。
+      - 核实状态：已核实。
+    - REF-007
+      - 来源：`src/panel/RemoteEditPanel.ts`；`src/sidebar/SidebarController.ts`。
+      - 用途：取消异常的用户反馈与 Webview 输出边界。
+      - 参考范围：Panel 945–987 行 profiles/pending 快照；1336–1409 行建连前后 catch 与 token；Sidebar 3055–3114 行 buildConnectOptions、进度和错误处理。
+      - 稳定锚点：`buildPendingConnectionSnapshot`、`private async connect(payload: any)`、`private async connectWithPayload`。
+      - 原文事实：两者先 buildConnectOptions 再建立进度取消源；前置 catch 直接报错；Panel 白名单快照只映射 Jump ID 和名称。
+      - 推导判断：修正前置取消分类；保留白名单并加入输出泄漏回归。
+      - 适用范围与限制：本次不将原有目标密码表单改为全新的交互模式。
+      - 核实状态：已核实。
+    - REF-004
+      - 来源：`src/ssh/SshJumpChain.ts`。
+      - 用途：核对运行时私钥输入与逐跳认证边界。
+      - 参考范围：117–179 行认证；235–260 行逐跳认证及 SSH 配置。
+      - 稳定锚点：`resolveSshAuthentication`、`const authentication = await resolveSshAuthentication`。
+      - 原文事实：缺密码报错；私钥需要口令时原生提示并可取消；每跳使用自己的认证与 keepalive。
+      - 推导判断：与 ConnectionManager 输入/存储测试衔接，不把临时秘密持久化。
+      - 适用范围与限制：源码能证明调用顺序，不能单独证明 OS socket 已关闭或延迟 error 一定出现。
+      - 核实状态：已核实。
+  - **预期产出**：
+    - 前置取消反馈修正、两份测试及最小共享 harness。
+    - 本任务 **交付结论：凭据与测试接入** — 导出 helper 符号、构造/恢复方式、secret key 与 mutation 观察方法、UI 接入方法、已验证输出边界和限制。
+  - **完成标准**：
+    - 不同 Jump ID 获取各自密码/口令；缺密码输入成功后不自动 store；取消不创建网络会话且两套 UI 显示 canceled。
+    - profiles/pending/active/日志捕获不含 synthetic secrets；已有 remember 偏好行为通过。
+    - harness 可供其他测试创建隔离实例并观察写入，npm test 实际执行新增测试且通过。
+
+### 4. 固化保存、删除与协议变更的引用图契约
+
+- [ ] **配置引用回归** - 通过真实持久化入口证明图合法性与拒绝前零写入
+  - **执行前上下文**：读取全局契约及本任务完整块。
+  - **目标文件**：
+    - `src/test/ConnectionManagerReferences.test.ts` — 新建公共保存/建连/删除/分组操作测试。
+    - `src/test/helpers/ConnectionManagerHarness.ts` — 仅补本任务需要的组与 mutation 观察。
+    - `src/connection/ConnectionManager.ts`、`src/connection/JumpChain.ts` — 仅在测试揭示既定引用契约违背时局部修正。
+    - `package.json` — 纳入新增测试。
+  - **范围说明**：覆盖稳定 ID、候选最终图校验、被引用对象删除/降级保护、组删除集合边界和 Direct 清除语义，已正确逻辑保持不动。
+  - **硬边界**：不将组内双方一起删除误判为外部依赖；不以自动清空依赖代替拒绝。
+  - **执行依据事实**：宿主已有迭代解析与 mutation 前校验；组删除针对剩余集合；省略 Jump 沿用、空串清除，非 SFTP 普通保存/连接清空（REF-003、REF-008、REF-006）。
+  - **规范清单**：
+    - 自引用、目标循环、中间循环、缺失及非 SFTP Jump 在 save/buildConnectOptions 网络前拒绝；有限 512 层链可解析。
+    - 单项删除或 SFTP→FTP/FTPS 被引用时拒绝且列依赖，拒绝前没有 globalState/secrets 写入。
+    - 重命名/移动组保留 ID；组-only 删除保留连接；组内整体删除无外部依赖可成功，有外部依赖则拒绝。
+    - SFTP 省略字段沿用，显式空串 Direct 清除；FTP/FTPS 普通参数归一化与备份拒绝不同，后者交任务 5。
+  - **允许的实现判断**：可用表驱动 fixture 减少重复；不改变已选图算法或增加深度上限。
+  - **优先级**：未指定，按依赖执行。
+  - **前置任务**：3
+  - **依赖产物与契约**：任务 3 产生 ConnectionManagerHarness 和“交付结论：凭据与测试接入”；通过该记录的导出符号创建真实 manager，确认 globalState/secrets mutation 可观测、实例隔离且无真实秘密后就绪。
+  - **下游交付**：任务 5 消费最终图校验与零写入的测试接入；任务 6 消费省略/空串/协议归一化的确定契约；任务 7 消费引用保护说明。
+  - **确认依赖**：无。
+  - **参考文档**：无。
+  - **参考代码**：
+    - REF-003
+      - 来源：`src/connection/JumpChain.ts`。
+      - 用途：链方向与图校验的现有契约。
+      - 参考范围：40–129 行。
+      - 稳定锚点：`resolveJumpProfileChain`、`visitedProfileIds`、`return nearestToOutermost.reverse()`。
+      - 原文事实：迭代解析，目标/中间自引用、循环、缺失和非 SFTP 引用报错；输出最外层到最近层。
+      - 推导判断：应复用现有宿主校验，不重写另一套持久化图算法。
+      - 适用范围与限制：纯函数行为不等于所有保存/导入入口已经充分测试。
+      - 核实状态：已核实。
+    - REF-008
+      - 来源：`src/connection/ConnectionManager.ts`。
+      - 用途：配置引用保护的 mutation 边界。
+      - 参考范围：316–373 行组删除；411–479 行保存；555–573 行单个删除；1192–1205 行统一校验；1273–1275 行普通连接协议归一化；1871–1880 行依赖提示。
+      - 稳定锚点：`deleteGroup`、`saveProfile`、`deleteProfile`、`validateProfileJumpReferences`、`findDirectJumpDependents`。
+      - 原文事实：校验先于写入；整组删除针对剩余 profiles 判断外部引用；非 SFTP 普通保存/建连清空 Jump。
+      - 推导判断：测试观察真实写入行为，并区分单项删除与集合删除语义。
+      - 适用范围与限制：无需新增自动重定向引用或级联清空策略。
+      - 核实状态：已核实。
+    - REF-008-R
+      - 来源：`src/connection/ConnectionManager.ts`。
+      - 用途：补齐重命名与移动分组的稳定 ID 验收入口。
+      - 参考范围：509–553 行；578–626 行。
+      - 稳定锚点：`renameProfile`、`moveProfileToGroup`。
+      - 原文事实：两者通过展开原 profile 更新名称/分组，保留 ID 和 Jump 字段，再写回。
+      - 推导判断：经公共方法验证引用身份不受显示名称与分组影响。
+      - 适用范围与限制：无额外限制。
+      - 核实状态：已核实；create 为补齐当前任务目标/验收定位而定向读取。
+    - REF-006
+      - 来源：`src/connection/ConnectionManager.ts`。
+      - 用途：核对省略、Direct 和普通连接协议归一化契约。
+      - 参考范围：1257–1341 行。
+      - 稳定锚点：`buildConnectOptions`、`input.jumpProfileId !== undefined`。
+      - 原文事实：省略字段沿用保存值；SFTP 显式空值清除；FTP/FTPS 普通连接参数清除 Jump；SFTP 在生成链前验证图。
+      - 推导判断：区分普通保存/建连归一化和非法 SFTP 图拒绝。
+      - 适用范围与限制：含密 runtime 对象允许存在于宿主当前尝试中；禁止向普通持久化或 outbound 消息扩散。
+      - 核实状态：已核实。
+  - **预期产出**：
+    - 公共入口引用回归测试及必要局部修正。
+    - 本任务 **交付结论：引用 mutation 契约** — 逐类操作结果、零写入断言位置、Direct 与协议归一化语义、组删除允许集合。
+  - **完成标准**：
+    - 上述真实方法操作有可观察结果/写入断言，非法图不能静默 Direct。
+    - 两种组删除、改名与移组、被引用降级/删除保护均符合契约；新增测试被 npm test 执行并通过。
+
+### 5. 固化备份版本、最终集合及加密凭据往返
+
+- [ ] **备份兼容回归** - 验证 merge/replace、版本兼容和可预检失败无副作用
+  - **执行前上下文**：读取全局契约及本任务完整块。
+  - **目标文件**：
+    - `src/test/ConnectionManagerBackup.test.ts` — 新建真实导出/导入与加解密测试，fixtures 内嵌在测试中。
+    - `src/test/helpers/ConnectionManagerHarness.ts` — 仅补 settings/附属数据写入观察。
+    - `src/connection/ConnectionManager.ts` — 限备份归一化、最终图校验、前置失败顺序及凭据 ID 恢复的契约修正。
+    - `package.json` — 纳入新增测试。
+  - **范围说明**：保留导出 v3、新版接受 v1/v2、旧版拒绝 v3 的兼容方向；真实 buildBackupFile/importBackupFile 完成引用和秘密往返。
+  - **硬边界**：可预检的版本/图/解密错误零写入不等于跨存储事务；不新增备份版本或加密算法。
+  - **执行依据事实**：当前已先构建最终集合、图校验和解密，再写入；merge 按 ID 覆盖导入字段，replace 只用导入集合并清理旧凭据（REF-009、REF-010）。
+  - **规范清单**：
+    - v1/v2 按无 Jump 导入；旧备份覆盖同 ID 现有 Jump 目标后为 Direct，不改为只补缺失字段。
+    - v3 保持 ID/引用，与数组顺序无关；merge 可引用保留的现有 Jump，replace 不可引用未导入旧对象。
+    - merge 覆盖 Jump 协议或关系后以最终图判断；重复 ID/不支持项沿用归一化，再检查剩余图。
+    - 普通 connection 项不含秘密；includeCredentials/restoreCredentials 明确选择时才导出/恢复，使用既有 scrypt/AES-256-GCM 和 profile ID 匹配。
+    - 错版本、非法图、错密码、缺少所选加密块在 settings/groups/profiles/secrets/附属数据写入之前失败；settings-only 原有路径保持可用。
+    - replace 成功沿用清除旧秘密再恢复选择的秘密；merge 不恢复凭据时保留既有语义。
+  - **允许的实现判断**：可采用表驱动版本/图 fixture；同名不同 ID 和每跳不同 synthetic secret，真实加解密不替换为永远成功的 mock。
+  - **优先级**：未指定，按依赖执行。
+  - **前置任务**：3, 4
+  - **依赖产物与契约**：任务 3 的 ConnectionManagerHarness/“凭据与测试接入”提供隔离存储及秘密观察；任务 4 的“引用 mutation 契约”和真实校验提供最终图/零写入测试方法。核对各 helper 实际导出和 mutation 记录能力，不只读勾选。
+  - **下游交付**：任务 7 消费版本兼容表、merge/replace 与加密恢复说明和失败保证边界。
+  - **确认依赖**：无。
+  - **参考文档**：无。
+  - **参考代码**：
+    - REF-009
+      - 来源：`src/connection/ConnectionManager.ts`。
+      - 用途：备份版本、最终集合和导入副作用顺序。
+      - 参考范围：670–695 行导出结构；748–787 行版本和导入准备；795–868 行 merge/replace、校验、解密及写入；915–940 行备份字段；1112–1162 行版本归一化；1459–1475 行旧 profile；1857–1869 行版本校验。
+      - 稳定锚点：`buildBackupFile`、`importBackupFile`、`toBackupConnection`、`normalizeBackupConnections`、`normalizeStoredProfile`、`validateBackupVersion`。
+      - 原文事实：导出使用当前版本 3；旧版本 Jump 归为 undefined；同 ID merge 覆盖导入字段；先验证最终图、解密，再写设置和存储。
+      - 推导判断：保留版本和覆盖语义，补往返与零写入测试；无事务保证不应夸大。
+      - 适用范围与限制：导入声明必须区分 merge、replace 与 settings-only；v3 向旧版本兼容不成立。
+      - 核实状态：已核实。
+    - REF-010
+      - 来源：`src/connection/ConnectionManager.ts`。
+      - 用途：加密凭据导出及恢复契约。
+      - 参考范围：697–705 行导出选项；843–889 行解密及按 ID 恢复；1164–1189 行收集/删除凭据；1891–1937 行加解密。
+      - 稳定锚点：`collectStoredCredentials`、`encryptCredentials`、`decryptCredentials`、`restoredCredentials[profileId]`。
+      - 原文事实：显式选择时用 scrypt/AES-256-GCM 加密；replace 清除旧凭据；只向导入 ID 恢复秘密。
+      - 推导判断：用真实加密往返与不同 ID 的 synthetic secrets 验证，不引入新加密设计。
+      - 适用范围与限制：普通备份结构与加密凭据块的验收规则不同；后者允许承载加密秘密。
+      - 核实状态：已核实。
+  - **预期产出**：
+    - 备份公共方法/真实加密回归测试及必要修正。
+    - 本任务 **交付结论：备份兼容与恢复** — 按版本、merge/replace、凭据选项记录结果与测试锚点，明确零写入范围及非事务限制。
+  - **完成标准**：
+    - v1/v2 与 v3 往返、乱序引用、merge 现存 Jump、replace 缺失 Jump、旧备份同 ID 恢复 Direct 均有断言。
+    - 同名不同 ID 的 synthetic secrets 正确配对；无密导出无秘密，含密导出为加密块；错密码等前置失败零写入。
+    - npm test 实际执行新增测试并通过。
+
+### 6. 验证交互式新建与双 UI 的 Jump 选择闭环
+
+- [ ] **交互回归** - 新建向导、编辑和 Quick Connect 的选择、清除、保存与路线保持一致
+  - **执行前上下文**：读取全局契约及本任务完整块。
+  - **目标文件**：
+    - `src/sidebar/SidebarController.ts` — addConnection、Jump picker、Jump 编辑与新建保存 payload。
+    - `src/sidebar/ConnectionDraftStore.ts`、`src/sidebar/ItemHelpers.ts`、`src/sidebar/Items.ts`、`src/sidebar/TreeProviders.ts` — 限 Jump 草稿/详情/路线字段。
+    - `src/panel/webview/scripts/RemoteSearch.ts`、`src/panel/webview/scripts/RemoteCommandActions.ts`、`src/panel/webview/scripts/StateDialogs.ts`、`src/panel/webview/scripts/TransferContextActions.ts` — 限 Jump 候选、payload、dirty、重载和选择事件。
+    - `src/test/SidebarConnectionWizard.test.ts`、`src/test/ConnectionUi.test.ts` — 新建向导与双 UI 行为测试。
+    - `src/test/helpers/ConnectionUiHarness.ts` — 限本入口所需原生输入、消息和表单替身。
+    - `package.json` — 纳入新增测试。
+  - **范围说明**：用户明确要求交互式新建时选择 Jump。当前已实现，应验证命令→向导→宿主保存→详情，以及两套 UI 编辑/Quick Connect 的 Direct 清除与协议切换；仅修正不符合既定契约的行为。
+  - **硬边界**：已有连接编辑或 Quick Connect 的通过不能代替新建向导验收；Direct 空串与 Esc undefined 不得混用。
+  - **执行依据事实**：addConnection 在用户名后调用 picker，再将 ID 保存；无候选仍有 Direct，Esc 返回。Webview payload 空值生成 undefined，而宿主省略语义是沿用，需经完整发送/保存路径验证并按既定清除契约修正（REF-017、REF-018、REF-008）。
+  - **规范清单**：
+    - 命令 remoteedit.sidebar.newConnection：名称/分组→协议→主机/端口/用户名→Jump→后续认证/配置→保存。
+    - SFTP picker 默认 Direct；合法已保存 SFTP 可选，允许候选自身有 Jump，显示名称/endpoint/路线；临时连接不是候选。
+    - 无候选仍能 Direct；Jump 处 Esc 不创建连接/凭据；FTP/FTPS 新建跳过 Jump。
+    - 保存后的 ID 和路线正确；SFTP 显式切 Direct 必须清除，省略才沿用。协议切换、dirty、保存/放弃/重载及 Quick Connect 均纳入同一字段契约。
+    - 候选筛选与宿主校验一致；失效引用明确显示/拒绝，不能无声变为 Direct。
+    - 本任务的自动验证实际执行宿主入口或生成的 Webview 逻辑及消息流，不能重新实现一份相同逻辑当作测试对象。VS Code 真正 UI 冒烟归任务 8。
+  - **允许的实现判断**：可构造小型原生输入队列与表单替身；已有代码符合要求时仅增加测试，不重写 UI 或扩大视觉样式范围。
+  - **优先级**：未指定，按依赖执行。
+  - **前置任务**：3, 4
+  - **依赖产物与契约**：任务 3 的“凭据与测试接入”提供取消分类和 UI harness（若存在，不存在则在本任务目标内新建）；任务 4 的“引用 mutation 契约”给出省略/空串和协议语义。核对实际保存结果与 helper 导出后使用。
+  - **下游交付**：任务 7 消费新建向导、双 UI 选择和清除行为说明以及任务 8 需要复核的交互场景。
+  - **确认依赖**：无。
+  - **参考文档**：无。
+  - **参考代码**：
+    - REF-017
+      - 来源：`src/sidebar/SidebarController.ts`；用户 2026-09-11 本轮补充。
+      - 用途：明确 VS Code 交互式新建的 Jump Host 选择入口及保存链路。
+      - 参考范围：211 行命令注册；537–543 行加载候选；575–642 行协议、目标输入与 Jump 步骤；770–800 行新建及保存；2679–2727 行 picker。
+      - 稳定锚点：`remoteedit.sidebar.newConnection`、`private async addConnection()`、`promptSidebarJumpProfileId`、`jumpProfileId = selectedJumpProfileId`。
+      - 原文事实：新建 SFTP 在用户名输入之后调用 Jump picker，undefined 直接退出，合法选择保存为 jumpProfileId；组及连接写入在后续保存阶段；picker 含 Direct 与合法的已保存 SFTP 候选，无候选时仍含 Direct。
+      - 推导判断：当前实现已有入口，应显式纳入流程和验收，避免仅验证编辑入口而漏掉交互式新建。
+      - 适用范围与限制：用户确认的是新建时提供选择；本轮没有在 VS Code UI 实际操作该向导，也未把源码核对当作交互测试通过。
+      - 核实状态：已核实源码与用户要求，交互验收待执行。
+    - REF-013
+      - 来源：`src/panel/webview/scripts/RemoteCommandActions.ts`；`src/sidebar/SidebarController.ts`。
+      - 用途：双 UI 候选与宿主校验的一致性。
+      - 参考范围：RemoteCommandActions 855–915 行；SidebarController 2679–2727 行。
+      - 稳定锚点：`analyzeJumpProfileCandidate`、`getJumpProfileSelectionError`、`promptSidebarJumpProfileId`。
+      - 原文事实：Webview 有迭代候选分析；Sidebar 构建 Direct-first picker 并利用 buildSidebarJumpDisplay 判断可用性。
+      - 推导判断：需要候选和 Direct 清除的跨入口回归，无须重写现有 UI。
+      - 适用范围与限制：前端校验不替代 ConnectionManager 的图校验。
+      - 核实状态：已核实源码，UI 操作未在本轮运行。
+    - REF-018
+      - 来源：`src/panel/webview/scripts/RemoteSearch.ts`；`src/sidebar/ConnectionDraftStore.ts`；`src/sidebar/ItemHelpers.ts`。
+      - 用途：定位 UI payload、dirty/草稿与路线验收边界。
+      - 参考范围：RemoteSearch 369–403 行表单快照、475–501 行保存消息、529–552 行 payload；ConnectionDraftStore 127–163 行字段更新、217–234 行类型归一化；ItemHelpers 176–205 行路线。
+      - 稳定锚点：`getComparableFormSnapshot`、`collectConnectionPayload`、`updateConnectionDetailDraft`、`normalizeDraftForType`、`buildSidebarJumpDisplay`。
+      - 原文事实：Webview payload 将空 Jump 转为 undefined；草稿保留显式空串，非 SFTP 清空；路线复用宿主解析器。
+      - 推导判断：以真实发送→保存路径验证 Webview Direct 清除；按既定空串清除契约修正，不新增导入/保存语义。
+      - 适用范围与限制：源码显示潜在字段丢失点，完整 UI 行为仍须测试复现。
+      - 核实状态：已核实；create 为补齐当前任务目标/验收定位而定向读取。
+    - REF-008
+      - 来源：`src/connection/ConnectionManager.ts`。
+      - 用途：UI 选择的最终保存语义。
+      - 参考范围：411–479 行；1273–1275 行。
+      - 稳定锚点：`saveProfile`、`input.jumpProfileId !== undefined`。
+      - 原文事实：省略沿用已有 Jump，显式空串清除，非 SFTP 清空，写入前校验。
+      - 推导判断：UI 不能以省略字段表达清除已保存 Jump。
+      - 适用范围与限制：无需新增自动重定向引用或级联清空策略。
+      - 核实状态：已核实。
+  - **预期产出**：
+    - 独立的新建向导测试和双 UI 行为测试、必要 payload/交互修正。
+    - 本任务 **交付结论：Jump 交互入口** — 新建/编辑/Quick Connect 各入口结果，Direct/Esc/协议切换语义、宿主保存证据和待真实 UI 复核项。
+  - **完成标准**：
+    - 新建五类场景（Direct、嵌套 Jump、无候选、Esc、FTP/FTPS）由真实入口驱动测试，保存 payload/写入结果正确。
+    - 已有 Jump 改 Direct 后真实保存值为空；刷新/重开不恢复旧 Jump；dirty/放弃/Quick Connect 不丢选择。
+    - npm test 执行新增测试并通过；未运行真实 UI 的部分明确交付任务 8。
+
+### 7. 整理用户文档、发布包边界与 dev 验收入口
+
+- [ ] **文档与打包验证** - 将已完成行为整理成可交付的用户说明和 dev 验证候选
+  - **执行前上下文**：读取全局契约及本任务完整块。
+  - **目标文件**：
+    - `README.md` — Jump 配置、交互式新建、Direct、协议范围、备份兼容与隔离拓扑说明。
+    - `CHANGELOG.md` — Unreleased 的最终用户行为；开发验证记录放任务结论/PR。
+    - `.vscodeignore` — 最小排除项目编译测试产物 out/test；保留运行时依赖。
+  - **范围说明**：将真实已完成行为写成英文用户说明，包含维护者关注的引用保护/凭据边界/备份语义；检查测试不会进入发布包，将源码、测试和验收场景清楚交付 dev 综合验证。
+  - **硬边界**：不把旧版可读 v3、可预检失败零写入等同于全面向后兼容/存储事务；未执行的拓扑或 UI 验证不能写成通过。
+  - **执行依据事实**：README/CHANGELOG 已有 Jump 与隔离拓扑说明；当前 .vscodeignore 未排除项目 out/test；维护者要求聚焦代码和相关文档/测试（REF-012、REF-016、REF-001）。
+  - **规范清单**：
+    - 描述用户如何在 Webview/Native Sidebar/交互式新建选择 Jump，Direct 如何清除，临时连接不作为候选。
+    - 描述每目标私有链、最外层探测、SFTP-only、节点/阶段错误、取消、引用删除/转换/组删除边界。
+    - 兼容表明确：新版本读 v1/v2 为 Direct；v3 往返引用；旧扩展拒绝 v3；旧备份 merge 同 ID 会覆盖为 Direct；replace 限最终导入集合并清理/选择恢复秘密。
+    - 明确普通项不含秘密、选择时才加密导出、按 ID 恢复；零写入只限前置版本/图/解密失败。
+    - 保留可复现隔离步骤 Local→D→C→B→A、A 名称只由 B 解析与服务端清理观察；历史开发未验证说明不作为永久产品限制，实际状态记录在本清单。
+    - 发布包文件清单必须证明 out/test 被排除且必要运行时仍在。项目未声明已核实的打包命令，执行时先查明可用 VSIX 清单/打包工具及版本再运行，记录真实命令；不可用时记录执行阻塞，不能以猜测命令/静态规则检查冒充包验证。
+  - **允许的实现判断**：英文文档编排和最小 ignore 规则可按项目风格调整；打包验证工具按可用环境选择，不将无关发布设施纳入工程。
+  - **优先级**：未指定，按依赖执行。
+  - **前置任务**：1, 2, 3, 4, 5, 6
+  - **依赖产物与契约**：
+    - 任务 1“隐藏链终止契约”、任务 2“SFTP 生命周期与通知”：当前运行时符号、关闭/错误行为及测试证据，用于准确文档化。
+    - 任务 3“凭据与测试接入”、任务 4“引用 mutation 契约”、任务 5“备份兼容与恢复”、任务 6“Jump 交互入口”：已验证行为、对应测试路径和待真实验收项。
+    - 这些由前置任务产生，完成后只读取上述主题记录和必要对应源码/测试符号；所有行为证据就绪且没有未解决契约失败才形成候选。
+  - **下游交付**：任务 8 消费“dev 验证候选”中的源码版本、实际功能/测试文件清单、命令与场景表，完成综合验收；不要求消费者回读 1–6 的整个设计。
+  - **确认依赖**：无。
+  - **参考文档**：
+    - REF-012
+      - 来源：`README.md`；`CHANGELOG.md`。
+      - 用途：更新已有用户文档和验证说明。
+      - 参考范围：README 317–351 行；CHANGELOG 3–14 行。
+      - 稳定锚点：`SFTP Jump Hosts`、`Isolated topology verification`、`Verification status`、`Unreleased`。
+      - 原文事实：已经有 Jump 使用与隔离拓扑说明，历史文本注明未执行集成。
+      - 推导判断：依据开发完成记录描述最终行为；未执行的外部验证仍准确标记。
+      - 适用范围与限制：说明书不是网络验证结果；原 prompt 的实现前现状不能当作今天的现状。
+      - 核实状态：已核实文本，外部拓扑未执行。
+    - REF-001
+      - 来源：<https://github.com/josegrabelha/remoteedit/issues/36>；维护者回复 <https://github.com/josegrabelha/remoteedit/issues/36#issuecomment-5470368754>。
+      - 用途：需求及维护者审查范围。
+      - 参考范围：issue 的 Summary、Expected behavior、Connection behavior、Validation；2026-08-30 维护者整条回复。
+      - 稳定锚点：`Feature request: SFTP Jump Host support`；`I'll pay particular attention to connection cleanup, credential handling, backward compatibility, connection references, and import/export behavior.`
+      - 原文事实：邀请向 main 提 PR、阅读 CONTRIBUTING、先提交单 PR；作者列出五项关注点。
+      - 推导判断：本次重点是审查证据与可靠性；回复不等于实现已获认可。
+      - 适用范围与限制：公开 issue 截至核实日仅一条评论；实现和测试声明需要独立核对。
+      - 核实状态：已核实，使用 GitHub API 读取正文与完整评论。
+  - **参考代码**：
+    - REF-016
+      - 来源：`.vscodeignore`。
+      - 用途：新增测试的发布包边界。
+      - 参考范围：1–16 行源文件与构建排除；17–42 行依赖与 extras 排除。
+      - 稳定锚点：`TypeScript sources and build metadata`、`Dependency files not needed at runtime`。
+      - 原文事实：排除了 src、TypeScript、map 等，没有项目级 `out/test` 排除。
+      - 推导判断：后续针对编译后的测试做最小排除并检查包内容。
+      - 适用范围与限制：本轮未制作 VSIX，未声称已观察到实际发布包内容。
+      - 核实状态：已核实规则，包内容待执行时复核。
+  - **预期产出**：
+    - README/CHANGELOG 和最小 .vscodeignore 更新。
+    - 本任务 **交付结论：dev 验证候选** — 源码提交/工作树状态、实际功能/测试文件允许清单、各测试入口及命令、1–6 关键结论的凝练结果、打包清单验证、任务 8 场景对应的可操作入口及尚未执行部分。
+  - **完成标准**：
+    - 文档与真实前置产物一致，覆盖交互式新建和备份覆盖语义，未声称未执行验证通过。
+    - 真实包文件清单排除 out/test、保留运行时代码及所需依赖；git diff --check 通过。
+    - 验证候选记录可供任务 8 直接定位代码、测试、打包命令与场景，不依赖历史聊天。
+
+### 8. 在 dev 完成自动、交互与隔离拓扑综合验收
+
+- [ ] **dev 验收** - 形成允许后续干净移植的已验证开发版本
+  - **执行前上下文**：读取全局契约及本任务完整块。
+  - **目标文件**：
+    - 本清单任务 8 的验证记录和交付结论 — 持久化命令、环境、源码版本、拓扑/交互/服务端证据及结果；本任务不新增功能代码。
+  - **范围说明**：在 dev 上运行任务 7 给出的候选测试，实际验证 VS Code 两套 UI、新建向导、隔离 SSH 多跳及原有最终目标工具；用完整结果判断能否进入移植。
+  - **硬边界**：mocks 不能替代真实隔离拓扑；缺环境不能将综合验收标为完成。遇到实现失败记录并交回对应修正任务/create，保留已有完成证据，修复后重新验收受影响项。
+  - **执行依据事实**：先前只有 15 项模拟/源码测试基线；README 定义了隔离拓扑，真实 UI 和网络未执行（REF-012、REF-017）。
+  - **规范清单**：
+    - 首先复核当前分支为 dev、实际候选源码和任务 7 记录一致；记录操作系统、Node/npm、VS Code/扩展版本和命令。代码发生变化先核对变更。
+    - 运行已实际接入全部新增测试的 npm test，并检查生成的功能 diff 与任务 7 允许清单；无需为相同源码反复单独执行已包含的编译。
+    - 实际运行交互式新建命令：Direct、合法嵌套 Jump、无候选、Jump 处 Esc、FTP/FTPS；验证保存字段/详情路线及 Esc 无连接/凭据写入。
+    - Webview 和 Sidebar 编辑/Quick Connect：选择、Direct 清除、协议切换、保存/放弃/重载、dirty、失效引用；两套 UI 的 Jump 密码取消均为 canceled。
+    - 使用可销毁且已获任务授权的测试主机/容器，Local 仅可达 D，D→C、C→B、B→A，阻断非必要路径；A 测试名称本地不可解析、B 可解析。记录可达/不可达及 DNS 证据。
+    - 混合认证连接最终 A，仅最终目标注册；目录浏览、读写、上传/下载可用。阻断中间边、错误认证、取消/远端关闭/正常断开，记录节点阶段与服务端 SSH 会话关闭证据。
+    - 直接 SFTP 密码/私钥/需口令、直接 FTP/FTPS，以及最终目标 SSH Terminal、普通端口转发、远程命令和文件操作做针对性冒烟。
+    - 环境/交互工具缺失属于执行复核失败：本任务记录已完成部分与阻塞项，保持未完成或阻塞，任务 9 不启动。不得把测试环境中的真实账号/密钥写入记录。
+  - **允许的实现判断**：可选择已有可销毁主机或容器实现既定拓扑；记录建立与清理方式，不扩大业务能力或执行生产环境变更。
+  - **优先级**：未指定，按依赖执行。
+  - **前置任务**：7
+  - **依赖产物与契约**：任务 7 的“交付结论：dev 验证候选”包含已形成的源码版本/实际文件清单、全部测试入口、各阶段行为摘要、包验证命令与待实际场景；按记录核对文件和符号存在、自动测试入口可用后执行，无需递归读取 1–6。
+  - **下游交付**：任务 9 消费“dev 验证通过版本”的准确提交/文件清单、测试与网络/UI结果、可移植状态。
+  - **确认依赖**：无。
+  - **参考文档**：
+    - REF-012
+      - 来源：`README.md`。
+      - 用途：执行隔离拓扑及最终目标工具验收。
+      - 参考范围：317–351 行，按前置任务 7 的预期更新重定位。
+      - 稳定锚点：`SFTP Jump Hosts`、`Isolated topology verification`。
+      - 原文事实：拓扑要求仅 Local→D→C→B→A 可达，A 主机名仅 B 可解析，并验证文件操作及终止。
+      - 推导判断：与模拟测试分开记录服务端/网络证据；真实验证未完成不能声称 dev 全部通过。
+      - 适用范围与限制：说明书不是网络验证结果；原 prompt 的实现前现状不能当作今天的现状。
+      - 核实状态：已核实文本，外部拓扑未执行。
+  - **参考代码**：
+    - REF-017
+      - 来源：`src/sidebar/SidebarController.ts`；用户 2026-09-11 本轮补充。
+      - 用途：单独执行用户指定的新建向导 UI 验收。
+      - 参考范围：211 行命令注册；537–543 行加载候选；575–642 行协议、目标输入与 Jump 步骤；770–800 行新建及保存；2679–2727 行 picker。
+      - 稳定锚点：`remoteedit.sidebar.newConnection`、`private async addConnection()`、`promptSidebarJumpProfileId`、`jumpProfileId = selectedJumpProfileId`。
+      - 原文事实：新建 SFTP 在用户名输入之后调用 Jump picker，undefined 直接退出，合法选择保存为 jumpProfileId；组及连接写入在后续保存阶段；picker 含 Direct 与合法的已保存 SFTP 候选，无候选时仍含 Direct。
+      - 推导判断：当前实现已有入口，应显式纳入流程和验收，避免仅验证编辑入口而漏掉交互式新建。
+      - 适用范围与限制：用户确认的是新建时提供选择；本轮没有在 VS Code UI 实际操作该向导，也未把源码核对当作交互测试通过。
+      - 核实状态：源码已核实，UI 操作未执行；任务 6 会交付自动行为测试，仍需本任务实际运行。
+  - **预期产出**：
+    - 本任务 **交付结论：dev 验证通过版本** — 在全部通过时记录准确源码提交、功能/测试文件清单、真实命令及结果、双 UI 场景结果、网络/DNS限制与服务端资源证据、环境版本、临时资源清理和已知限制。清单自身完成记录不改变已验证功能源码。
+    - 若未通过，使用 **交付结论：dev 验证阻塞或失败** 记录具体失败对象与证据，不生成肯定的通过结论。
+  - **完成标准**：
+    - npm test、双 UI/交互新建、隔离拓扑与原有协议/工具冒烟均有真实通过证据，已创建的测试资源按计划清理。
+    - 明确源码提交和移植文件清单，没有未验证的功能变更；任一必需场景缺失不能标记本任务完成。
+    - 交付结论足以让任务 9 判断源版本及验证范围，不能只有“全部正常”。
+
+### 9. 将已验证 dev 功能移植到干净 PR 分支并重新验证
+
+- [ ] **Git 整合与验证** - 基于最新上游 main 形成聚焦的、可审查的 PR 分支
+  - **执行前上下文**：读取全局契约及本任务完整块；本任务在独立工作树操作，完成记录仍回写原 dev 目录下本清单。
+  - **目标文件**：
+    - Git 分支/工作树：拟在 `E:\workspace\vscode\remoteedit-pr` 创建 `codex/sftp-jump-host-pr`，基于执行时核实的最新上游 main；现有同名对象只能在身份匹配且干净时复用，否则选择未占用路径/名称并记录，不能覆盖。
+    - 移植允许文件集合（相对新工作树根；仅取任务 8 已验证清单中实际存在的文件，optional helper 未创建则不移植）：
+      - `.vscodeignore`
+      - `README.md`
+      - `CHANGELOG.md`
+      - `package.json`
+      - `package-lock.json`
+      - `src/connection/ConnectionManager.ts`
+      - `src/connection/JumpChain.ts`
+      - `src/panel/RemoteEditPanel.ts`
+      - `src/panel/webview/markup/Body.ts`
+      - `src/panel/webview/scripts/LayoutSessions.ts`
+      - `src/panel/webview/scripts/RemoteCommandActions.ts`
+      - `src/panel/webview/scripts/RemoteSearch.ts`
+      - `src/panel/webview/scripts/StateDialogs.ts`
+      - `src/panel/webview/scripts/TransferContextActions.ts`
+      - `src/panel/webview/scripts/TransfersStatus.ts`
+      - `src/panel/webview/styles/Styles.ts`
+      - `src/remote/RemoteSessionTypes.ts`
+      - `src/remote/RemoteSessionManager.ts`
+      - `src/remote/RemoteSessionRouter.ts`
+      - `src/sidebar/ConnectionDraftStore.ts`
+      - `src/sidebar/ItemHelpers.ts`
+      - `src/sidebar/Items.ts`
+      - `src/sidebar/SidebarController.ts`
+      - `src/sidebar/TreeProviders.ts`
+      - `src/ssh/SftpSessionManager.ts`
+      - `src/ssh/SshJumpChain.ts`
+      - `src/test/JumpChain.test.ts`
+      - `src/test/SshJumpChain.test.ts`
+      - `src/test/SftpSessionManager.test.ts`
+      - `src/test/RemoteSessionRouter.test.ts`
+      - `src/test/helpers/SftpSessionHarness.ts`
+      - `src/test/ConnectionManagerCredentials.test.ts`
+      - `src/test/ConnectionCredentialUi.test.ts`
+      - `src/test/helpers/ConnectionManagerHarness.ts`
+      - `src/test/helpers/ConnectionUiHarness.ts`
+      - `src/test/ConnectionManagerReferences.test.ts`
+      - `src/test/ConnectionManagerBackup.test.ts`
+      - `src/test/SidebarConnectionWizard.test.ts`
+      - `src/test/ConnectionUi.test.ts`
+    - 本清单任务 9 的 Git/验证/交付记录 — 位于原 dev 工作树，规划资料不纳入 PR。
+  - **范围说明**：按任务 8 固定的源码版本移植功能、相关测试和用户文档，保留上游贡献指南/许可及最新变更，重新验证最终分支，再推送到用户 fork 供 PR 使用。
+  - **硬边界**：不将 docs/prompts 或内部完成清单带入上游 diff；不重写/强推 fork dev，不用旧 dev 文件覆盖上游无关更新。分支已存在时不能未经核对重置。
+  - **执行依据事实**：准备时上游 main 为 6d443738d7c05ebce1b1934d820a88df258d698c，dev 功能基于 a18ed11f4f11580bffe87b35a17b16979305416a，缺新增贡献文件；这些是历史基线，执行时必须刷新（REF-002）。
+  - **规范清单**：
+    - 首先核对任务 8 完成及“dev 验证通过版本”：源码提交、实际允许文件清单和全部验证证据；未通过时不建移植分支。
+    - 只读获取最新上游 main SHA 并创建独立工作树/分支。可使用针对已验证文件的 patch 或选择性提交移植，方法由实际历史决定。
+    - 若有冲突，只在允许文件的 Jump 功能范围适配上游；需要改变业务契约或范围时返回 prepare/create，不静默吸收。
+    - CONTRIBUTING.md 与 LICENSE 取上游版本，阅读最新条款；其并入不算本功能代码修改。
+    - 重新安装 lockfile 依赖并运行 npm test；用已验证的打包清单入口复查最终包。对最终移植版本做新建/Direct/多跳关键冒烟；发生冲突或行为修改的场景必须补充重验，源码与环境等价时可引用 dev 完整验证证据及等价依据。
+    - 比较最新上游 main 的三点 diff，检查只有实际允许文件、无内部规划/凭据/无关空白；生成源码/测试变更摘要。
+    - 验证后提交和推送到 tzraeq/remoteedit 的该分支。复核 GitHub/remote 身份；认证失败记录阻塞，不更换到其他账号/仓库。
+  - **允许的实现判断**：在已验证语义内选择 patch/cherry-pick 等移植方式、提交组织、最小冲突适配；不改变功能或强行照搬旧整文件。
+  - **优先级**：未指定，按依赖执行。
+  - **前置任务**：8
+  - **依赖产物与契约**：任务 8 产生“交付结论：dev 验证通过版本”，需包含准确源提交、文件清单、自动/双 UI/隔离网络结果、环境限制与清理记录；核对 SHA 可解析、文件集为本允许集合子集且必需场景均通过后就绪。未通过结论不能作为移植来源。
+  - **下游交付**：任务 10 消费“干净 PR 分支”的 fork/head/base SHA、已推送状态、最终 diff、移植后验证结果及引用 dev 证据的等价条件。
+  - **确认依赖**：无。
+  - **参考文档**：
+    - REF-002
+      - 来源：<https://github.com/josegrabelha/remoteedit/blob/6d443738d7c05ebce1b1934d820a88df258d698c/CONTRIBUTING.md>；同提交的 `LICENSE`；本地 Git refs。
+      - 用途：PR 目标、贡献约定及整合基线。
+      - 参考范围：CONTRIBUTING 的 Pull Requests、Contribution License；LICENSE 的 Contributions；`git log dev..main`、`git merge-base dev main`。
+      - 稳定锚点：`Pull requests should target the main branch`（原文 main 带反引号）；`perpetual, worldwide, non-exclusive, irrevocable, royalty-free license`。
+      - 原文事实：要求聚焦改动并补相关测试/文档；提交贡献授予作者列明的使用、修改、分发等许可；dev 缺少新增指南和条款的提交。
+      - 推导判断：后续基于最新 main 整理 PR，保留其贡献文件；当前 prepare 不发生贡献提交。
+      - 适用范围与限制：许可是仓库原文事实，不在本次改写；不能把审查邀请等同于发布保证。
+      - 核实状态：已核实；上游 main SHA 经 API 确认，指南经 API 读取，LICENSE 经对应本地 main 读取。
+    - REF-001
+      - 来源：<https://github.com/josegrabelha/remoteedit/issues/36>；维护者回复 <https://github.com/josegrabelha/remoteedit/issues/36#issuecomment-5470368754>。
+      - 用途：需求及维护者审查范围。
+      - 参考范围：issue 的 Summary、Expected behavior、Connection behavior、Validation；2026-08-30 维护者整条回复。
+      - 稳定锚点：`Feature request: SFTP Jump Host support`；`I'll pay particular attention to connection cleanup, credential handling, backward compatibility, connection references, and import/export behavior.`
+      - 原文事实：邀请向 main 提 PR、阅读 CONTRIBUTING、先提交单 PR；作者列出五项关注点。
+      - 推导判断：本次重点是审查证据与可靠性；回复不等于实现已获认可。
+      - 适用范围与限制：公开 issue 截至核实日仅一条评论；实现和测试声明需要独立核对。
+      - 核实状态：已核实，使用 GitHub API 读取正文与完整评论。
+  - **参考代码**：前置任务 8 已验证提交中的允许文件，按交付清单及实际修改符号读取；这是依赖产物，不冒充准备时已有的新测试/修复。
+  - **预期产出**：
+    - 已验证并推送的干净 fork 分支。
+    - 本任务 **交付结论：干净 PR 分支** — 工作树路径、源 dev SHA、上游 base SHA、fork/head branch/head SHA、移植方式、冲突适配、diff 文件/规模、验证命令与结果、可引用的 dev 证据和限制。
+  - **完成标准**：
+    - 分支确实基于核实的上游 main，feature diff 仅包含允许集合中已验证内容；原 dev 与规划历史完整。
+    - 移植后测试/包检查与关键冒烟通过，受冲突影响行为有重验；远端 fork head 与本地验证提交一致。
+    - 交付记录可以直接用于定位 PR 的 base/head 和书写真实验证说明。
+
+### 10. 向上游 main 提交单个 PR
+
+- [ ] **PR 交付** - 提交聚焦的 SFTP Jump Host PR 并提供可审查的五项证据
+  - **执行前上下文**：读取全局契约及本任务完整块；仅后续执行授权覆盖本任务时进行外部提交。
+  - **目标文件**：
+    - GitHub 外部产物：`josegrabelha/remoteedit` 的一个 PR，base 为 `main`，head 为任务 9 已验证并推送的 `tzraeq/remoteedit` 分支。
+    - 本清单任务 10 的 PR 标题/正文草稿、提交结果和交付记录；不修改功能源码。
+  - **范围说明**：准备英文标题与完整正文，核实最终 base/head 后创建 PR，链接 issue #36；完成于 PR 已创建且其 diff/验证说明正确。
+  - **硬边界**：不将邀请审查写为已接受，不声明缺少证据的测试通过；本任务不合并 PR 或发布扩展。
+  - **执行依据事实**：维护者邀请 main 单 PR，并关注清理、凭据、兼容、引用和备份；CONTRIBUTING/许可贡献条款适用（REF-001、REF-002）。
+  - **规范清单**：
+    - 创建前先在当前任务记录形成可审查的英文 title/body：用户无法直达目标的触发场景、Direct/多跳/双 UI/新建行为、五项设计及证据、兼容/备份覆盖语义、实际验证命令/环境/限制、issue #36 关联。
+    - 复核任务 9 的已验证 head 未变化、上游 main 是否变化、最终 diff 与记录一致；变化影响验证时回任务 9，不绕过新代码验证。
+    - 检查已有同一 head/base PR，有则更新该 PR，避免重复。提交前核对授权账号与仓库；使用结构化正文参数或 UTF-8 body 文件保持换行。
+    - 用户要求的是单个 PR；在正文说明先单 PR 的维护者建议。附真实双 UI 示例/证据定位，不使用含真实秘密的截图或日志。
+    - 投稿按上游实际许可条款执行；准备文档不能冒充用户已提交贡献。当前动作的授权以随后覆盖本任务的执行请求为准，不额外设置无来源审批。
+  - **允许的实现判断**：英文标题和段落组织按最终变更编写；引用测试结果而不堆积开发过程。可使用可用 GitHub CLI/连接器完成创建与读取验证。
+  - **优先级**：未指定，按依赖执行。
+  - **前置任务**：9
+  - **依赖产物与契约**：任务 9 的“交付结论：干净 PR 分支”包含 fork/head/base SHA、推送结果、最终 diff 与验证；核对远端匹配、可访问且未混入未验证提交。dev 验证只引用该记录已确认等价的证据，不回读整条任务历史。
+  - **下游交付**：无。
+  - **确认依赖**：无。
+  - **参考文档**：
+    - REF-001
+      - 来源：<https://github.com/josegrabelha/remoteedit/issues/36>；维护者回复 <https://github.com/josegrabelha/remoteedit/issues/36#issuecomment-5470368754>。
+      - 用途：需求及维护者审查范围。
+      - 参考范围：issue 的 Summary、Expected behavior、Connection behavior、Validation；2026-08-30 维护者整条回复。
+      - 稳定锚点：`Feature request: SFTP Jump Host support`；`I'll pay particular attention to connection cleanup, credential handling, backward compatibility, connection references, and import/export behavior.`
+      - 原文事实：邀请向 main 提 PR、阅读 CONTRIBUTING、先提交单 PR；作者列出五项关注点。
+      - 推导判断：本次重点是审查证据与可靠性；回复不等于实现已获认可。
+      - 适用范围与限制：公开 issue 截至核实日仅一条评论；实现和测试声明需要独立核对。
+      - 核实状态：已核实，使用 GitHub API 读取正文与完整评论。
+    - REF-002
+      - 来源：<https://github.com/josegrabelha/remoteedit/blob/6d443738d7c05ebce1b1934d820a88df258d698c/CONTRIBUTING.md>；同提交的 `LICENSE`；本地 Git refs。
+      - 用途：PR 目标、贡献约定及整合基线。
+      - 参考范围：CONTRIBUTING 的 Pull Requests、Contribution License；LICENSE 的 Contributions；`git log dev..main`、`git merge-base dev main`。
+      - 稳定锚点：`Pull requests should target the main branch`（原文 main 带反引号）；`perpetual, worldwide, non-exclusive, irrevocable, royalty-free license`。
+      - 原文事实：要求聚焦改动并补相关测试/文档；提交贡献授予作者列明的使用、修改、分发等许可；dev 缺少新增指南和条款的提交。
+      - 推导判断：后续基于最新 main 整理 PR，保留其贡献文件；当前 prepare 不发生贡献提交。
+      - 适用范围与限制：许可是仓库原文事实，不在本次改写；不能把审查邀请等同于发布保证。
+      - 核实状态：已核实；上游 main SHA 经 API 确认，指南经 API 读取，LICENSE 经对应本地 main 读取。
+  - **参考代码**：任务 9 的已验证远端 diff，限实际移植文件；不重新全量扫描仓库。
+  - **预期产出**：
+    - 英文 PR 标题/正文与真实 GitHub PR URL。
+    - 本任务 **交付结论：PR 提交结果** — URL、number、base/head/SHA、创建或更新方式、核对结果；若外部提交失败记录原因，不能生成虚假 URL。
+  - **完成标准**：
+    - 读取已创建/更新 PR，确认 base 为上游 main、head 为验证分支、状态开放、diff 匹配且关联 #36。
+    - 正文回答维护者五个关注点，明确交互式新建和兼容语义，验证声明可追溯。
+    - 向用户交付可访问的 PR 链接；没有把 PR 创建等同于被接受或合并。
