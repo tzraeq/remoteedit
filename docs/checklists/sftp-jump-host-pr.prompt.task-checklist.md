@@ -585,7 +585,7 @@
 ### 8. 在 dev 完成自动、交互与隔离拓扑综合验收
 
 - [x] **dev 验收** - 形成允许后续干净移植的已验证开发版本
-  - **完成时间**：2026-09-12 15:16；以下最终交付取代历史进行中/阻塞结论。
+  - **完成时间**：2026-09-12 15:15:27（验收记录提交）；以下最终交付取代历史进行中/阻塞结论。
   - **交付结论：dev 验证通过版本**：固定功能源提交232ec5589c77c67809eb13d6789a9bc56dc5f06d（dev）。本清单任务9“移植允许文件集合”列出的文件均已存在，是本次实际功能/测试/文档移植清单，包含既有多跳功能及本轮生命周期、凭据取消、Direct清除、未保存草稿凭据和中间跳通知修复；使用该文件集合从git merge-base(dev,上游main)提取功能patch，保留上游CONTRIBUTING/LICENSE，不带docs规划文件。npm test含编译114/114、git diff --check通过；最终249项vsce ls中out/test和.temp为0、六项必要runtime文件齐全。后续只修改文档文字与清单，不改变已测源码。
   - **真实验证交付**：稳定VS Code 1.121.0（D:\Microsoft VS Code）、Windows10.0.26200/Node24.5.0/npm11.5.1；原生/Webview新建、候选过滤、嵌套、Direct清除、保存/放弃/重载、引用保护、密码/口令取消已验证。四节点隔离拓扑、B专属名称解析、混合认证、三个Direct认证、文件读写/拖拽上传下载、SSH终端/远程命令/普通转发、私有链互不影响、目标拒绝认证、中间边拒绝/取消/disconnectAll、远端中间跳关闭和正常断开均有上述逐批证据；修复后的UI自动移除与各跳零残留通过。
   - **范围与限制**：2026-09-12用户确认FTP/FTPS只保留路由自动回归和真实UI协议边界，不搭真实传输服务，不宣称网络验证通过。Windows直连内层地址的connect可返回成功但无SSH banner，隔离证据按实际banner/firewall/DNS记录解释。右键Upload混合文件/目录选择器在Windows只显示目录，为未修改的既有入口限制；本次上传/下载用单文件拖拽与哈希证明，不宣称该入口已修复。
@@ -699,11 +699,11 @@
 ### 9. 将已验证 dev 功能移植到干净 PR 分支并重新验证
 
 - [x] **Git 整合与验证** - 基于最新上游 main 形成聚焦的、可审查的 PR 分支
-  - **完成时间**：2026-09-12 15:22。
+  - **完成日期**：2026-09-12（分支推送与核查在PR创建前完成）。
   - **交付结论：干净 PR 分支**：独立工作树E:\workspace\vscode\remoteedit-pr，分支codex/sftp-jump-host-pr；上游base 6d443738d7c05ebce1b1934d820a88df258d698c，源dev 232ec5589c77c67809eb13d6789a9bc56dc5f06d，最终head c8fc5bd4b75539016cf8179bef66a30726bdee71已推送tzraeq/remoteedit并经ls-remote一致确认。40文件、4290新增/233删除；从共同基线提取白名单patch，全部无冲突，逐一Git blob与dev源相同。CONTRIBUTING/LICENSE保持上游，规划文档/.temp/凭据不在diff；GitHub登录已确认tzraeq。
   - **移植后验证**：在新工作树npm ci --prefer-offline成功，npm test含编译114/114，git diff --cached --check通过；vsce ls245项，无out/test、.temp或内部规划，六项runtime齐全。transplant-smoke.cjs明确加载新工作树out的真实ConnectionManager/SftpSessionManager，在重建隔离环境中验证Direct密码与D/C/B/A混合链，目录/读取/写入/读回/删除/断开均通过，各容器零ESTABLISHED。新建/Direct/嵌套自动UI测试重跑；真实UI引用任务8，因为全部40文件blob和lockfile相同、无冲突适配，未冒称在新宿主再次人工操作。
   - **清理与推送记录**：重新移除四容器和三网络，测试镜像remoteedit-jump-pr-smoke:20260912也已移除；保留本地被排除的调试数据。首次push遇GitHub TLS连接失败，经远端查询无分支后以HTTP/1.1正常重试成功，无强推。原dev与已推送历史完整。
-  - **执行起点（2026-09-12 15:18）**：任务8已完成，dev源232ec5589c77c67809eb13d6789a9bc56dc5f06d及验收记录a062439已推送origin/dev。最新上游main仍为6d443738d7c05ebce1b1934d820a88df258d698c，贡献指南和LICENSE已读取。允许集合40项全部存在；从共同基线a18ed11f4f11580bffe87b35a17b16979305416a到固定dev源提取仅这40文件的patch。拟创建独立remoteedit-pr工作树/codex/sftp-jump-host-pr，未将内部规划或上游许可差异纳入patch。
+  - **执行起点（2026-09-12）**：任务8已完成，dev源232ec5589c77c67809eb13d6789a9bc56dc5f06d及验收记录a062439已推送origin/dev。最新上游main仍为6d443738d7c05ebce1b1934d820a88df258d698c，贡献指南和LICENSE已读取。允许集合40项全部存在；从共同基线a18ed11f4f11580bffe87b35a17b16979305416a到固定dev源提取仅这40文件的patch。拟创建独立remoteedit-pr工作树/codex/sftp-jump-host-pr，未将内部规划或上游许可差异纳入patch。
   - **执行前上下文**：读取全局契约及本任务完整块；本任务在独立工作树操作，完成记录仍回写原 dev 目录下本清单。
   - **目标文件**：
     - Git 分支/工作树：拟在 `E:\workspace\vscode\remoteedit-pr` 创建 `codex/sftp-jump-host-pr`，基于执行时核实的最新上游 main；现有同名对象只能在身份匹配且干净时复用，否则选择未占用路径/名称并记录，不能覆盖。
@@ -797,7 +797,7 @@
 ### 10. 向上游 main 提交单个 PR
 
 - [x] **PR 交付** - 提交聚焦的 SFTP Jump Host PR 并提供可审查的五项证据
-  - **完成时间**：2026-09-12 15:25。
+  - **完成时间**：2026-09-12 15:20:55（PR最终读取核查）。
   - **交付结论：PR 提交结果**：已用tzraeq账号创建https://github.com/josegrabelha/remoteedit/pull/38，标题Add SFTP Jump Host support；base josegrabelha/remoteedit:main，head tzraeq/remoteedit:codex/sftp-jump-host-pr，验证SHA c8fc5bd4b75539016cf8179bef66a30726bdee71。创建前同head/base无已有PR；创建后重新GET确认state=open、作者/仓库/分支/SHA匹配，远端40文件diff集合与本地三点diff完全一致，4290新增/233删除，正文关联Closes #36并包含五项审查证据、114测试及真实验证/FTP未测限制。PR正文即下方已持久化草稿；未合并或发布扩展。
   - **拟提交标题**：Add SFTP Jump Host support
   - **拟提交正文（2026-09-12）**：
