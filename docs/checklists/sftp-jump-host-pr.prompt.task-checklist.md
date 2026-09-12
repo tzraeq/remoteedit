@@ -9,8 +9,9 @@
 - 编制依据：2026-09-11 用户明确调用 create，并确认“先在 dev 开发和验证，通过后干净分支移植，再提交 PR”。交互式新建 SFTP 必须让用户选择 Jump Host，是用户另行明确的要求。
 - 基线：当前 dev HEAD 为 `db981eb`，工作区干净；相对实现基线 `4c83099` 只有 PR prompt 文档新增，源码 REF 行号仍适用。此前实际执行 npm test 为 15/15，包含编译；当前清单各项新增验收尚未执行。
 - 任务阶段：1–7 在 dev 开发/补测/整理文档；8 在 dev 完成综合验收；9 在干净分支移植并重新验证；10 提交 PR。先开发后移植是用户确认的执行顺序。
-- 拆分 review：**待 review**。本轮授权生成清单，不自动开始实现；后续明确执行本清单或指定任务即可提供相应执行授权，无需重复确认已经确定的方案。
+- 拆分 review：**已获执行授权**。2026-09-11 用户要求“完成一下这个清单，需要我的时候停下来喊我”，覆盖现有任务 ID 1–10 的逐项连续执行；遇到真实阻塞或需要用户参与时停止。
 - 本清单为新需求的执行快照，保留原 `docs/checklists/sftp-multi-hop-jump.task-checklist.md` 的完成历史。
+- 验收范围修订（2026-09-12 用户确认“好，收尾吧，然后别忘了及时commit push”）：FTP/FTPS传输实现及依赖未改，保留共享路由自动回归和已完成双UI协议边界验证，取消额外真实FTP/FTPS服务器测试；任务8/9按此范围交付，不宣称FTP/FTPS真实网络通过。任务9移植集合补入任务3实际已验证的EventBindings.ts取消状态修复。既有任务1–10执行授权保持，dev提交和推送获再次明确授权。
 
 ## 清单状态说明
 
@@ -64,7 +65,9 @@
 
 ### 1. 使隐藏 SSH 链在异步终止时可靠释放
 
-- [ ] **运行时与回归** - 明确隐藏 SSH client/channel 的终止时序并修正可复现缺口
+- [x] **运行时与回归** - 明确隐藏 SSH client/channel 的终止时序并修正可复现缺口
+  - **补充交付结论：隐藏链终止契约（2026-09-12 14:59）**：真实脚本verify-remote-close.cjs关闭keepalive后重启B，捕获B的ssh2 end但无close，旧manager仍为active，断言失败。已在SshJumpChainDependencyOverrides新增可选onUnexpectedClose；open成功移交后，已跟踪client/channel的end/error/close仅通知owner一次；显式dispose抑制通知，监听随实际close移除，未提供owner时自行dispose。建链阶段仍保留原节点/阶段错误处理。任务2需将此回调接入cleanupAttempt。SshJumpChain测试17/17通过，包括新增一次通知、监听释放与主动关闭不误通知；完整集成验证随任务2执行。
+  - **真实验收回流（2026-09-12 14:56）**：任务8重启中间跳B后，用户确认Lab-A仍显示已连接，切目录Loading后报Keepalive timeout；日志14:55:41记录list超时，14:56服务端仍有Local→D和D→C。按允许的最小owner通知范围重开本项，补充隐藏资源终止到所属最终会话的通知与回归；此前无owner通知的交付限制已被真实场景证实不足。
   - **执行前上下文**：读取全局契约及本任务完整块。
   - **目标文件**：
     - `src/ssh/SshJumpChain.ts` — 修改资源跟踪、dispose、connect/forward 终止路径；认证与 hop 顺序只做必要衔接。
@@ -121,9 +124,18 @@
     - 既有三跳顺序、错误阶段及只探测最外层场景保持通过；npm test 通过。
     - 交付结论能供任务 2 判断如何移交/终止资源；风险未复现时可交付无需修改的结论，但必须有对应测试证据。
 
+
+  - **完成时间**：2026-09-11 21:24:00
+  - **实际产出**：src/ssh/SshJumpChain.ts 的资源关闭跟踪、dispose、迟到 stream 清理；src/test/SshJumpChain.test.ts 的异步关闭替身及新增回归场景。
+  - **交付结论：隐藏链终止契约**：已复现 destroy 后移除 error 监听导致延迟错误未捕获；现在逆序发起幂等清理，dispose 等待已跟踪资源的实际 close，随后仅移除自身监听。未启动 client 可直接结束；open 在最终移交前再次核对取消/销毁状态。迟到 channel 保留保护直到 close 并释放。真实 ssh2 Channel 的未读数据会阻塞 close，销毁后 resume 排空废弃数据解决该问题。没有新增 owner 通知：ssh2 transport close 会使挂起 forward 回调失败，任务 2 应继续负责最终 SFTP client 和会话状态。证据：新增 delayed error、pending forward、pending connect、late stream 与 real ssh2 forwarding channel 测试；依赖 ssh2 1.17.0 的 lib/client.js 797–829、lib/Channel.js 205–217、lib/utils.js 105–110。适用限制：受控 client 与真实 Channel 行为验证，不代表完整隔离网络验收。
+  - **验证结果**：npm test（包含 TypeScript 编译）21/21 通过，无未处理错误；git diff --check 通过。保持原三跳顺序、逐跳认证、最外层探测和反向清理验证。
+  - **遗留问题**：无；隔离网络验证按任务 8 执行。
+
 ### 2. 闭合 SFTP 连接尝试、活动会话与 Router 的生命周期
 
-- [ ] **运行时与集成回归** - 使取消、disconnectAll、远端关闭和重连保持资源与活动状态一致
+- [x] **运行时与集成回归** - 使取消、disconnectAll、远端关闭和重连保持资源与活动状态一致
+  - **补充交付结论：中间跳终止通知（2026-09-12 15:01）**：SftpSessionManager创建链时将onUnexpectedClose接入现有cleanupAttempt；中间跳end/error/close立即移除所属活动记录并经原onDidCloseConnection通知Router，最终SFTP仍按既有5000ms上限先关闭，finally释放链。三个新增manager回归先失败后通过，并验证另一个共用Jump引用的目标保持活动；链新增三个通知/监听回归。npm test含编译114/114通过，git diff --check通过。真实verify-remote-close.cjs在keepalive全部关闭时重启B，修复前hasConnection断言失败，修复后2秒观察窗口内active已移除、通知一次，disconnectAll收敛；SSH事件证实所有本次客户端end/close，服务端无本次新增连接残留。原未重载UI宿主仍保留旧故障前段，不将其当作新代码的运行结果；真实UI重验在任务8继续。
+  - **真实验收回流（2026-09-12 14:59）**：消费任务1新增onUnexpectedClose，将中间跳终止接入现有cleanupAttempt，清理活动记录并通知Router/UI。三项manager回归已先复现end/close/error后旧目标仍active；修改仅限现有生命周期衔接和对应测试。
   - **执行前上下文**：读取全局契约及本任务完整块。
   - **目标文件**：
     - `src/ssh/SftpSessionManager.ts` — 连接尝试登记、身份校验、资源移交、有界终止、远端关闭与活动状态。
@@ -195,14 +207,22 @@
     - 两个目标共用一个 Jump profile 时各有私有资源；关闭一个不影响另一个。
     - 迟到 close/不收敛 end 的受控场景在既定边界结束；全套 npm test 通过，直接 SFTP 与协议路由行为有动态断言。
 
+
+  - **完成时间**：2026-09-11 21:37:14
+  - **实际产出**：`src/ssh/SftpSessionManager.ts` 的 attempts/sessionClosers/closingAttempts、connect、disconnect(All)、closeClientForDisconnect 和无共享写入的初始化；`src/remote/RemoteSessionManager.ts` 与 `RemoteSessionRouter.ts` 的关闭通知/建立中取消；`src/test/SftpSessionManager.test.ts`、`src/test/RemoteSessionRouter.test.ts`、共享外部边界替身 `src/test/helpers/SftpSessionHarness.ts`；package.json 接入两份行为测试。
+  - **交付结论：SFTP 生命周期与通知**：每次 connect 在首次异步建连前登记独立取消源与清理函数；平台、cwd、startPath 完成后才移交活动 session、白名单 ActiveConnection 和平台缓存。清理校验 attempt/client 身份，旧结果/close 不删除新会话；关闭中的 Promise 单独跟踪，重复 disconnectAll 等待现有清理。最终 SFTP end 采用已有 5000ms 上限（同步抛错/拒绝也收敛），取消强制销毁最终 client，finally 清理私有 Jump 链。`onDidCloseConnection: vscode.Event<string>` 在当前活动记录及缓存清除后发出，仅传 ID；Router 按 manager/route 身份移除路由，经既有 onDidChangeConnections 通知 Panel/Sidebar，显式关闭去重。各目标私有链，ActiveConnection 只新增 Jump ID/名称，不携带 runtime 链或密码。
+  - **验证结果**：npm test（含编译）51/51 通过；git diff --check 通过。新增测试先复现建立中断开仍注册、远端 close 状态残留/UI 无事件、重复 disconnectAll 提前返回，再验证修复。覆盖 probe/SSH/forward/最终 SFTP/平台/cwd/startPath 失败或取消、迟到结果与重连、最终关闭顺序与模拟时间 5000ms 超时、共用 Jump profile 的资源隔离；实际认证 helper 读取临时生成的普通/加密 RSA 私钥并验证口令路径，直接密码与 FTP/FTPS manager 路由均有动态断言。
+  - **遗留问题**：无本任务阻塞。cwd/startPath 的既有容错回退保持；网络与 vscode API 用受控边界，未声称真实 VS Code 或隔离网络验收通过，这部分留任务 8。
+
 ### 3. 验证逐跳凭据隔离并修正输入取消反馈
 
-- [ ] **凭据与双 UI 反馈** - 保持每跳取密身份和临时输入边界，取消显示为 canceled
+- [x] **凭据与双 UI 反馈** - 保持每跳取密身份和临时输入边界，取消显示为 canceled
   - **执行前上下文**：读取全局契约及本任务完整块。
   - **目标文件**：
     - `src/connection/ConnectionManager.ts` — 限逐跳取密、输入、保存偏好及安全快照的契约修正。
     - `src/panel/RemoteEditPanel.ts` — 前置 buildConnectOptions catch、pending/busy 复位和 outbound 快照。
-    - `src/sidebar/SidebarController.ts` — connectWithPayload 前置取消分类与活动状态复位。
+    - `src/panel/webview/scripts/EventBindings.ts` — 宿主取消消息后的客户端 pending 清理、活动选择与取消反馈；`RemoteCommandActions.ts` 的 pending/表单谓词、`TransfersStatus.ts` 的控制锁定条件作为只读参考。
+    - `src/sidebar/SidebarController.ts` — connectWithPayload 前置取消分类与活动状态复位，以及 openSavedConnection 的 Connect Without Saving 临时凭据传递。
     - `src/test/ConnectionManagerCredentials.test.ts`、`src/test/ConnectionCredentialUi.test.ts` — 新建公共凭据方法和实际 UI 宿主入口测试。
     - `src/test/helpers/ConnectionManagerHarness.ts` — 新建内存 globalState/secrets、输入和写入/日志观察工具，供任务 4、5 复用。
     - `src/test/helpers/ConnectionUiHarness.ts` — 需要共享时新建最小 Panel/Sidebar 原生输入与消息替身，供任务 6 复用。
@@ -212,6 +232,7 @@
   - **执行依据事实**：每跳 SecretStorage key 已按 ID 隔离，缺密码原生提示并抛取消异常；两套 UI 在创建进度源前调用 buildConnectOptions，前置 catch 按普通错误处理（REF-006、REF-007）。
   - **规范清单**：
     - Jump 密码仍在网络前提示，Esc 取消整次尝试，不触发网络、不显示 Connection failed；Panel/Sidebar 清除关联 pending/busy/活动状态。
+    - 宿主通过明确的连接 ID 取消标记通知 Webview，客户端清除对应临时记录；保存连接及 Quick Connect 均可再次连接，其他连接保持，取消不回发重复 cancelConnection。用真实生成脚本的消息处理补充回归。
     - 运行时私钥口令依照需要提示并使用连接 token；目标已有保存偏好保持不变。
     - 捕获 globalState、profiles、pending/active outbound 消息和日志，验证不含各跳密码/口令/私钥内容；runtime 允许持有当前秘密。
     - route 只显示名称，错误节点/阶段可含 host/port；禁止打印完整配置。
@@ -259,9 +280,22 @@
     - profiles/pending/active/日志捕获不含 synthetic secrets；已有 remember 偏好行为通过。
     - harness 可供其他测试创建隔离实例并观察写入，npm test 实际执行新增测试且通过。
 
+
+  - **完成时间**：2026-09-11 21:41:46
+  - **修订/review 记录（2026-09-12）**：任务 8 的真实 Jump 密码 Esc 暴露 Webview 持续 Connecting；在原用户任务 1–10 执行授权内回流任务 3，补齐上述前端文件范围及消息回归，不改变业务需求。保留首次完成证据，但首次 busy/connecting 复位结论仅覆盖宿主替身，未证明 Webview。新增范围依据：EventBindings.ts 96–183 的 sessionsChanged 合并保留客户端 pending；RemoteCommandActions.ts 547–677 的临时记录及表单谓词；TransfersStatus.ts 557–635 的 pending 锁定控件。修复和补测完成后再恢复任务 8 的真实复验。
+  - **实际产出**：Panel.connect 与 Sidebar.connectWithPayload 的前置取消分类；`ConnectionManagerCredentials.test.ts`、`ConnectionCredentialUi.test.ts`；共享 `ConnectionManagerHarness.ts`、`ConnectionUiHarness.ts`；package.json 测试入口。ConnectionManager 既有凭据逻辑验证正确，未修改。
+  - **交付结论：凭据与测试接入**：`createConnectionManagerHarness(profiles?)` 返回真实 manager、context、output、state/secrets Map、reads、writes（state/store/delete）、logs 和 ui 输入/观察队列；`profile(id, overrides)` 构造安全 profile，`secretKey(id, field)` 使用 remoteedit.connectionSecret.<id>.<password|passphrase>。各测试调用工厂创建隔离存储实例并重置输入；`loadWithVscode` 仅临时替换 vscode 模块，finally 恢复 loader。`createConnectionUiHarness(harness, sessions)` 返回 Panel/Sidebar 原型实例，执行实际 connect、connectWithPayload、sendProfiles、sendSessions、pending 快照与消息/日志方法，绕过构造中的无关视图服务，messages 捕获 webview.postMessage，refreshes 观察 Sidebar 刷新。任务 4/5 直接复用 manager/storage，任务 6 可复用 UI 入口与输入队列。
+  - **验证结果**：npm test（含编译）60/60 通过，git diff --check 通过。已复现并修复双 UI 前置 Esc 被当作失败；现在网络调用为 0，显示 Connection canceled，busy/connecting 状态复位。不同 Jump 的密码/口令按 ID 读取，临时密码不 store，目标 remember 语义保持；保存 profile 的 state 写入、profiles/pending/active outbound 与开启 debug/performance 的日志捕获均无 synthetic secrets。运行时真实私钥解析及取消 token 已由任务 1/2 测试覆盖。
+  - **遗留问题**：无。UI 为真实宿主方法加 vscode/native/network 边界替身，active fixture 接续任务 2 的安全快照契约；真实 VS Code 交互验收仍留任务 8。
+
+  - **补充完成记录（2026-09-12 11:24）**：修复真实验收发现的 Webview 取消后持续 Connecting。Panel.sendSessions 传递 cancelledConnectionId 并清除无效活动 ID；EventBindings 在合并前清除对应客户端 pending，保留其他连接，空会话时恢复文件区和 Connection canceled 反馈。网络阶段取消共用此通知。createJumpWebviewHarness(profiles, true) 执行真实生成脚本的消息处理、pending 创建/合并和锁定谓词，渲染边界仍为替身。修复前保存连接/Quick Connect 两条回归在 hasAnyConnectingSession 断言失败；修复后两条通过，另加网络取消保留其他活动/临时连接回归通过，无重复 cancelConnection。npm test（含编译）105/105 通过，git diff --check 通过。真实按钮/表单恢复由任务 8 用户重载稳定版后复验，尚未记为通过。
+  - **修订/review 记录（2026-09-12 11:54）**：原生真实验收回报 Password is required；核对 SidebarController.ts 2996–3054 的 openSavedConnection/connectSavedConnection 与 ConnectionDraftStore.ts 90–118 的 mergeProfileWithDraft，发现不保存连接使用安全展示 profile，未携带 draft.password/passphrase。沿原任务凭据边界补齐宿主运行时传递，保持展示 profile 无秘密；临时密码/口令只用于当前尝试且不 store。测试必须调用真实 openSavedConnection 并选择 Connect Without Saving，覆盖 Jump 密码提示可达/取消与临时秘密不出现在持久化、消息及日志；原完成证据保留。
+
+  - **补充完成记录（2026-09-12 11:57）**：Sidebar.openSavedConnection 在 Connect Without Saving 路径将 draft.password/passphrase 显式加入仅宿主 runtime 输入；connectSavedConnection 接收 ConnectionProfileInput。展示 profile 仍无秘密，未修改 DraftStore。新增三条真实 openSavedConnection 回归：无保存密码时可以到达 Jump 提示并 Esc，临时密码和私钥口令优先于原保存值，成功/取消均不写入 secrets/globalState，日志/消息/展示快照无测试秘密。修复前复现目标密码遗漏及错误使用已保存密码；修复后 npm test（含编译）108/108 通过，git diff --check 通过。原生真实复验待用户重载后执行，任务 8 未完成。
+
 ### 4. 固化保存、删除与协议变更的引用图契约
 
-- [ ] **配置引用回归** - 通过真实持久化入口证明图合法性与拒绝前零写入
+- [x] **配置引用回归** - 通过真实持久化入口证明图合法性与拒绝前零写入
   - **执行前上下文**：读取全局契约及本任务完整块。
   - **目标文件**：
     - `src/test/ConnectionManagerReferences.test.ts` — 新建公共保存/建连/删除/分组操作测试。
@@ -327,9 +361,16 @@
     - 上述真实方法操作有可观察结果/写入断言，非法图不能静默 Direct。
     - 两种组删除、改名与移组、被引用降级/删除保护均符合契约；新增测试被 npm test 执行并通过。
 
+
+  - **完成时间**：2026-09-11 21:43:07
+  - **实际产出**：`src/test/ConnectionManagerReferences.test.ts` 的 17 项真实公共入口行为测试，package.json 接入；生产引用逻辑保持不变。
+  - **交付结论：引用 mutation 契约**：save/build 拒绝自引用、目标/中间循环、缺失及 FTP/FTPS Jump，候选保存闭环也被拒绝；所有拒绝通过 harness.writes=[] 验证 state/store/delete 零写入。512 层合法链实际解析成功。单项删除或被引用 SFTP 降级拒绝并列依赖名称；改名、移动分组保留 ID/Jump 引用；组-only 删除只移除分组，整组删除允许内部相互引用一起移除、拒绝剩余集合对该组的外部依赖。SFTP 保存/建连省略 jumpProfileId 沿用、显式空串清除；普通 FTP/FTPS 保存/建连清空 Jump，备份入口另按任务 5 验收。证据按本测试各命名 test 稳定定位。
+  - **验证结果**：npm test（含编译）77/77 通过；git diff --check 通过。
+  - **遗留问题**：无。
+
 ### 5. 固化备份版本、最终集合及加密凭据往返
 
-- [ ] **备份兼容回归** - 验证 merge/replace、版本兼容和可预检失败无副作用
+- [x] **备份兼容回归** - 验证 merge/replace、版本兼容和可预检失败无副作用
   - **执行前上下文**：读取全局契约及本任务完整块。
   - **目标文件**：
     - `src/test/ConnectionManagerBackup.test.ts` — 新建真实导出/导入与加解密测试，fixtures 内嵌在测试中。
@@ -380,9 +421,16 @@
     - 同名不同 ID 的 synthetic secrets 正确配对；无密导出无秘密，含密导出为加密块；错密码等前置失败零写入。
     - npm test 实际执行新增测试并通过。
 
+
+  - **完成时间**：2026-09-11 21:44:49
+  - **实际产出**：`ConnectionManagerBackup.test.ts` 的 15 项公共备份入口测试；ConnectionManagerHarness 增加 ui.configurationWrites；package.json 接入。生产备份逻辑保持不变。
+  - **交付结论：备份兼容与恢复**：当前导出 v3；新版接受 v1/v2 并忽略 Jump 字段，旧备份覆盖同 ID 目标后为 Direct。v3 乱序引用往返保持 ID；merge 可引用保留的既有 Jump，覆盖协议/关系后检查最终图；replace 只依赖导入集合，漏 Jump 拒绝。重复 ID 保留首个支持项，不支持项跳过后仍检查图；v3 FTP/FTPS 带 Jump 拒绝。不同 ID 同名 profile 的密码/口令经真实 scrypt/AES-256-GCM 加解密正确恢复，仅恢复导入 ID；replace 清掉旧秘密，merge 未选恢复保留原秘密。普通导出和公开字段无秘密，显式选择时才出现加密块。测试名对应版本、最终图、加密往返、settings-only 场景。
+  - **验证结果**：npm test（含编译）92/92 通过；git diff --check 通过。版本 0/未来版本 4、非法图、错误密码、选择恢复但缺少加密块均在 state/groups/profiles/secrets/附属数据及 settings 写入前拒绝（writes 与 configurationWrites 为空）。settings-only 路径保持。旧版拒绝 v3 是既有版本上限兼容方向，本次未执行旧版扩展宿主；没有宣称 v3 可供旧版导入。
+  - **遗留问题**：无。零写入只覆盖可预检失败，不提供跨 VS Code 设置、globalState、SecretStorage 的事务保证。
+
 ### 6. 验证交互式新建与双 UI 的 Jump 选择闭环
 
-- [ ] **交互回归** - 新建向导、编辑和 Quick Connect 的选择、清除、保存与路线保持一致
+- [x] **交互回归** - 新建向导、编辑和 Quick Connect 的选择、清除、保存与路线保持一致
   - **执行前上下文**：读取全局契约及本任务完整块。
   - **目标文件**：
     - `src/sidebar/SidebarController.ts` — addConnection、Jump picker、Jump 编辑与新建保存 payload。
@@ -453,9 +501,16 @@
     - 已有 Jump 改 Direct 后真实保存值为空；刷新/重开不恢复旧 Jump；dirty/放弃/Quick Connect 不丢选择。
     - npm test 执行新增测试并通过；未运行真实 UI 的部分明确交付任务 8。
 
+
+  - **完成时间**：2026-09-11 21:50:03
+  - **实际产出**：`RemoteSearch.ts/collectConnectionPayload` 保留 SFTP Direct 的显式空串；`SidebarConnectionWizard.test.ts`、`ConnectionUi.test.ts`；ConnectionUiHarness 扩展向导输入与生成 Webview 函数执行；package.json 接入。
+  - **交付结论：Jump 交互入口**：实际 addConnection→picker→saveProfile→详情路线测试覆盖 Direct、嵌套 Jump、无候选、Jump Esc、FTP、FTPS；证实 SFTP 用户名之后默认 Direct，候选带 endpoint/路线，Esc 零写入，FTP/FTPS 跳过 Jump。实际生成脚本的选择/dirty/保存消息→真实 manager 持久化复现并修复 Direct 变 undefined 导致沿用旧值的问题，现发送空串，刷新重开保持 Direct。Sidebar 草稿保留空串；两套入口验证丢弃/重载、Quick Connect、协议切换清除及非法候选/不可用引用提示。
+  - **验证结果**：npm test（含编译）102/102 通过；git diff --check 通过。Webview 测试由 renderClientScript 完整生成代码，经 TypeScript AST 提取实际声明及依赖后执行，没有另写 Jump 逻辑；只替换无关视图渲染/原生对话框。ConnectionUiHarness 新导出 createJumpWebviewHarness，context 调用真实选择与保存函数、messages 捕获实际 saveConnection payload。
+  - **遗留问题**：无。命令注册已核对至 SidebarController 的 remoteedit.sidebar.newConnection→addConnection；实际 VS Code 命令调用、原生 picker 焦点/外观及完整 Webview DOM 交互由任务 8 复核，未将方法/表单替身测试冒充真实 UI 冒烟。
+
 ### 7. 整理用户文档、发布包边界与 dev 验收入口
 
-- [ ] **文档与打包验证** - 将已完成行为整理成可交付的用户说明和 dev 验证候选
+- [x] **文档与打包验证** - 将已完成行为整理成可交付的用户说明和 dev 验证候选
   - **执行前上下文**：读取全局契约及本任务完整块。
   - **目标文件**：
     - `README.md` — Jump 配置、交互式新建、Direct、协议范围、备份兼容与隔离拓扑说明。
@@ -517,9 +572,55 @@
     - 真实包文件清单排除 out/test、保留运行时代码及所需依赖；git diff --check 通过。
     - 验证候选记录可供任务 8 直接定位代码、测试、打包命令与场景，不依赖历史聊天。
 
+  - **完成时间**：2026-09-11 21:54:00
+  - **实际产出**：README 的 SFTP Jump Hosts / Jump Host backup compatibility / Isolated topology verification；CHANGELOG Unreleased；.vscodeignore 增加 out/test/** 和本地恢复缓存 .temp/** 排除。
+  - **交付结论：dev 验证候选**：源为 dev HEAD `ea25a0a0cd4f6dbcb022c7733b7713fcf5ab61a2` 加当前未提交工作树；这不是已提交的验收通过版本。任务 1–6 修正已落地，自动测试 102/102 通过；隐藏链按真实 close 清理、每目标私有资源、取消覆盖建立中各阶段，远端关闭经 Router 通知双 UI；凭据按 ID 读取且输出无秘密；引用 mutation 与 v1/v2/v3 备份语义已有动态证据；向导覆盖 Direct/嵌套/无候选/Esc/FTP/FTPS，Webview 保存 Direct 的空串丢失已修复。
+    - **实际功能文件清单**：`src/connection/ConnectionManager.ts`、`src/connection/JumpChain.ts`、`src/remote/RemoteSessionTypes.ts`、`src/remote/RemoteSessionManager.ts`、`src/remote/RemoteSessionRouter.ts`、`src/ssh/SshJumpChain.ts`、`src/ssh/SftpSessionManager.ts`、`src/panel/RemoteEditPanel.ts`、`src/panel/webview/markup/Body.ts`、`src/panel/webview/scripts/StateDialogs.ts`、`src/panel/webview/scripts/RemoteSearch.ts`、`src/panel/webview/scripts/RemoteCommandActions.ts`、`src/panel/webview/scripts/TransferContextActions.ts`、`src/panel/webview/scripts/TransfersStatus.ts`、`src/sidebar/SidebarController.ts`、`src/sidebar/ConnectionDraftStore.ts`、`src/sidebar/ItemHelpers.ts`。这些涵盖既有 Jump 能力及本轮修正；配置/文档为 package.json、README.md、CHANGELOG.md、.vscodeignore。最终移植仍按任务 9 允许范围与实际 upstream diff 核对。
+    - **测试文件与入口**：`src/test/` 下 JumpChain.test.ts、SshJumpChain.test.ts、SftpSessionManager.test.ts、RemoteSessionRouter.test.ts、ConnectionManagerCredentials.test.ts、ConnectionCredentialUi.test.ts、ConnectionManagerReferences.test.ts、ConnectionManagerBackup.test.ts、SidebarConnectionWizard.test.ts、ConnectionUi.test.ts；helper 为 `src/test/helpers/` 下 SftpSessionHarness.ts、ConnectionManagerHarness.ts、ConnectionUiHarness.ts。`npm test` 先运行 TypeScript 编译，再通过 Node --test 显式执行这十个 out/test/*.test.js；单组可在编译后使用 `node --test out/test/<名称>.test.js`。
+    - **包验证入口与结果**：Windows PowerShell 执行 `& 'E:\npm\node_global\vsce.ps1' ls`（vsce 3.1.1，默认检测运行时依赖），真实清单 249 项；out/test 与 .temp 均为 0 项；out/extension.js、out/ssh/SshJumpChain.js、out/ssh/SftpSessionManager.js、node_modules/ssh2/lib/client.js、node_modules/ssh2-sftp-client/src/index.js、node_modules/basic-ftp/dist/index.js 均存在。未生成 VSIX；开发文档仍在 dev 清单，干净 PR 分支按任务 9 排除规划文件。
+    - **任务 8 操作场景**：在真实 VS Code 启动当前扩展，切换 Webview 与 Native Sidebar，保存 Jump 后选 Direct 保存重开、切换协议、检查脏态丢弃、Quick Connect 和非法引用；通过 `remoteedit.sidebar.newConnection`（Remote Edit: Add Connection）检查用户名后的 Jump picker、默认 Direct、嵌套候选 endpoint/路线、无候选、Esc 无新增连接/凭据、FTP/FTPS 跳过。缺失 Jump 密码时 Esc，核对 canceled 和 pending 清除。按 README Isolated topology verification 建立 Local→D→C→B→A，相邻边可达且 A 名称仅 B 可解析；浏览、读写、上传下载，阻断中间边/错误认证/取消，观察服务端连接释放；两目标共享 Jump、远端关闭、建立中 Disconnect All，验证资源隔离与双 UI 状态一致。使用 synthetic credentials；按任务 8 记录环境版本、限制和清理。
+  - **验证结果**：复用任务 6 未变化的实现/测试输入及 102/102 编译测试结果（Node 24.5.0、npm 11.5.1、ssh2 1.17.0）；文档与前置交付结论逐项核对，命令显示标题已与 package.json 对齐；真实 vsce ls 与 git diff --check 通过。
+  - **遗留问题**：真实 VS Code 交互、隔离网络/DNS/文件操作和服务端清理尚未执行，属于任务 8 必须通过的验收；当前不能据此移植或提交 PR。维护者要求的最新 CONTRIBUTING 在本地不存在，任务 9/10 按其契约从最新上游核对。
+
 ### 8. 在 dev 完成自动、交互与隔离拓扑综合验收
 
-- [ ] **dev 验收** - 形成允许后续干净移植的已验证开发版本
+- [x] **dev 验收** - 形成允许后续干净移植的已验证开发版本
+  - **完成时间**：2026-09-12 15:16；以下最终交付取代历史进行中/阻塞结论。
+  - **交付结论：dev 验证通过版本**：固定功能源提交232ec5589c77c67809eb13d6789a9bc56dc5f06d（dev）。本清单任务9“移植允许文件集合”列出的文件均已存在，是本次实际功能/测试/文档移植清单，包含既有多跳功能及本轮生命周期、凭据取消、Direct清除、未保存草稿凭据和中间跳通知修复；使用该文件集合从git merge-base(dev,上游main)提取功能patch，保留上游CONTRIBUTING/LICENSE，不带docs规划文件。npm test含编译114/114、git diff --check通过；最终249项vsce ls中out/test和.temp为0、六项必要runtime文件齐全。后续只修改文档文字与清单，不改变已测源码。
+  - **真实验证交付**：稳定VS Code 1.121.0（D:\Microsoft VS Code）、Windows10.0.26200/Node24.5.0/npm11.5.1；原生/Webview新建、候选过滤、嵌套、Direct清除、保存/放弃/重载、引用保护、密码/口令取消已验证。四节点隔离拓扑、B专属名称解析、混合认证、三个Direct认证、文件读写/拖拽上传下载、SSH终端/远程命令/普通转发、私有链互不影响、目标拒绝认证、中间边拒绝/取消/disconnectAll、远端中间跳关闭和正常断开均有上述逐批证据；修复后的UI自动移除与各跳零残留通过。
+  - **范围与限制**：2026-09-12用户确认FTP/FTPS只保留路由自动回归和真实UI协议边界，不搭真实传输服务，不宣称网络验证通过。Windows直连内层地址的connect可返回成功但无SSH banner，隔离证据按实际banner/firewall/DNS记录解释。右键Upload混合文件/目录选择器在Windows只显示目录，为未修改的既有入口限制；本次上传/下载用单文件拖拽与哈希证明，不宣称该入口已修复。
+  - **资源清理**：已执行topology/cleanup.sh并复查，remoteedit-pr-a/b/c/d四容器与ba/cb/dc三网络全部移除；HTTP服务随A结束，本机临时转发先前已关闭。FTP构建失败且无服务容器。测试密钥/备份/调试数据保留在本地.temp恢复目录，已用.git/info/exclude隐藏且扩展包排除，不提交；测试SSH镜像暂保留供移植关键冒烟复用，任务9结束后移除。不安装/卸载编辑器。
+  - **FTP/FTPS验证范围复评（2026-09-12 15:12）**：用户要求重新评估必要性。最新中间跳修复仅在SshJumpChain/SftpSessionManager及测试；本轮PR整体还修改共享Router、Panel和Sidebar，因此不能宣称仅影响SFTP分支。src/ftp与package-lock相对dev基线无改动；现有114项测试含FTP/FTPS独占路由到FTP manager及双UI/向导协议边界，用户已完成真实双UI新建/切换/Jump隐藏验证。评估建议保留共享路径回归，取消额外搭建FTP/FTPS真实服务器作为本次PR门禁；此为范围复评结论，不将未执行网络测试记通过，完成标准尚待据此修订。FTP测试构建53279已因构建依赖下载TLS失败退出，未生成服务容器；停止后续搭建，不重试。
+  - **真实网络失败与API取消验收（2026-09-12 15:08）**：verify-network-failures.cjs调用真实编译SftpSessionManager与真实SSH网络，仅VSCode边界替身、forwardOut包装只观测调用。依次在测试C容器OUTPUT临时插入仅C→B:22的REJECT或DROP：拒绝错误定位Lab-C opening a forward to Lab-B；实际pending forward期间外部token取消、manager.disconnectAll均拒绝建连并收敛。每项后四容器ss均为空，临时规则逐项finally删除。三项均实际通过；未改主机防火墙，不等同于提供Disconnect All UI按钮。
+  - **连续批次 AA–AC 结果（2026-09-12 15:07）**：用户确认AA为Target Lab-A establishing the final SFTP connection / All configured authentication methods failed，其余通过。扩展日志15:05:02最终认证失败、15:05:59 canceled、15:06:31成功、15:06:34打开hello、15:06:37断开；A SSH日志实际Failed password（来源39744）且preauth关闭，后续40786成功并正常断开；四容器ss均无ESTABLISHED。目标服务端认证拒绝、已建立D/C时B口令Esc、成功重试和清理通过。
+  - **中间跳关闭UI复验通过（2026-09-12 15:03）**：用户明确“刚才立即就恢复了”，确认Lab-A自动移除且Connect恢复。结合15:02四容器无ESTABLISHED，真实中间跳关闭到UI及整链释放通过。
+  - **连续批次 AA–AC 交接（2026-09-12 15:04）**：均使用Advanced View已保存Lab-A且不记住/保存凭据。AA目标密码故意wrong-target，D密码jump-smoke-only、B口令jump-key-only，预期最终Target认证失败而非Jump错误，无活动且Connect恢复；AB目标密码恢复jump-smoke-only，D密码同值，在B私钥口令框Esc，预期canceled、无活动且可重试，此时前段D/C已建连；AC全部正确重连，读取hello.txt，再Disconnect，保持无活动供代理核查日志及服务端释放。尚待用户结果。未提供Disconnect All UI步骤：代码中该方法是管理器/扩展清理接口，无对应公开UI命令，真实API验证另行执行。
+  - **稳定版中间跳关闭复验（2026-09-12 15:02）**：用户重载并报告已连接；新日志output_logging_20260912T150121记录15:01:22激活、15:01:57 Lab-A经D/C/B成功。代理先确认仅一套新链（D入46836、D→C39960、C→B47076、B→A49484），再重启remoteedit-pr-b；随后四容器ss均无ESTABLISHED，B22监听已恢复。原旧故障连接也已随用户重载释放。新代码在真实UI宿主下整链释放已核实；等待用户确认Lab-A自动从活动列表消失，尚不代替UI观察。
+  - **中间跳关闭修复与重验交接（2026-09-12 15:01）**：用户报告Lab-A仍连接、切目录Loading后Keepalive timeout；真实日志确认14:55:41 list超时。已回流任务1/2修复中间跳通知，114/114自动测试和keepalive禁用的真实B重启脚本通过，详情见任务2补充交付。用户确认lib有通知即可继续；已核实ssh2 Client end/close/error，实际B仅先发end。下一步用户在D:\Microsoft VS Code稳定调试宿主执行Developer: Reload Window加载新编译版本，重新连接Lab-A（目标/D密码jump-smoke-only、B口令jump-key-only、不保存），告知连接就绪；代理随后再重启测试B并核查UI和各跳释放。用户尚未重载，UI验收不能记通过。
+  - **连续批次 W–Z 结果（2026-09-12 14:53）**：用户确认修正 X 后全部通过。扩展日志显示已保存 Lab-A 于14:19:53连接；Quick quick-mty11p2j-7ufdrs于14:52:20通过同一 Lab-D→C→B链成功，14:52:32命令退出0，14:53:03仅Quick断开，14:53:11原Lab-A新命令退出0，无重连记录。A上quick-shared-check.txt与saved-survives-check.txt分别为quick-shared-ok、saved-survives-ok；四容器ss核查只剩一套Local→D→C→B→A连接。共享Jump引用时会话独立、断开Quick不影响已保存目标通过。
+  - **中间跳意外关闭验证进行中（2026-09-12 14:54）**：代理已向用户说明并仅重启测试容器remoteedit-pr-b，命令成功，B的22端口恢复监听。其后14:54:21核查B/A无ESTABLISHED，但Local→D、D→C仍保留；扩展日志未出现断开记录。当前尚不能将服务端关闭清理记为通过，需用户观察Lab-A活动状态并继续调查传播/清理；暂不要求手动Disconnect，以保留现场。
+  - **批次 X 步骤纠正（2026-09-12）**：用户反馈 Quick 填成与 Lab-A 相同后控件置灰。核对 RemoteCommandActions.findSessionForCurrentForm：Quick 按 host/protocol/port/username/authType/jumpProfileId 匹配已有会话；TransfersStatus.setControls 对匹配的已连接表单锁定详情，符合现有行为。原步骤无法建立独立第二连接，不记 X–Z 通过。修正为重新选择 New / Quick Connection 清空表单，将 Quick Host 改为 172.29.243.3，其余参数不变；在 B 实际 getent hosts 确认该 IP 正是 target-only.jump-test 的 A 地址。两目标地址写法不同但共同引用 Lab-B→C→D，仍验证独立链；Y/Z 标记和仅断开 Quick 的步骤保持，Lab-A 不断开。
+  - **连续批次 S–V 结果（2026-09-12 14:05）**：用户确认全部通过；扩展日志记录 Lab-D Direct 密码、普通私钥、加密私钥三次成功、打开 hello.txt 并断开。V 错误准确指向 Lab-B validating the private key / bad passphrase；14:03 只读 UI 核查 Connect 可用、No open connections yet.，四容器 ss 均无 ESTABLISHED，D/C 已认证连接关闭、B preauth 关闭、A 无新增连接。私钥解密失败定位与资源释放通过，不能替代服务端拒绝认证。文件列表仍残留 Connecting... 占位文字，按钮已恢复；保留这一观察，不将其等同于活动连接残留。
+  - **连续批次 W–Z 交接（2026-09-12 14:05）**：W 正确凭据重连已保存 Lab-A 并保持；X 新建不保存的 Quick SFTP 到 target-only.jump-test:22、smoke、密码 jump-smoke-only、Jump Lab-B、路径 /home/smoke/files，D 密码同值、B 口令 jump-key-only，与 Lab-A 同时保持两个目标会话；Y 在 Quick 目标执行 echo quick-shared-ok | tee /home/smoke/files/quick-shared-check.txt；Z 只断开 Quick，切回仍连接的 Lab-A 执行 echo saved-survives-ok | tee /home/smoke/files/saved-survives-check.txt，保持 Lab-A 供代理核查。测试共同引用 Jump 时链独立及断开互不影响；尚待用户结果。
+  - **连续批次 O–R 结果（2026-09-12 13:50）**：用户确认全部通过；A服务端command-check.txt与terminal-check.txt分别为command-ok、terminal-ok；HTTP日志记录GET /hello.txt?ui=forward-check返回200。Windows22237监听数0、四容器ss无ESTABLISHED；服务端日志显示各跳连接关闭、A会话关闭，UI No open connections yet./Connect恢复。最终目标远程命令、SSH终端、普通端口转发与正常断开释放通过。
+  - **连续批次 S–V 交接（2026-09-12 13:51）**：均在Advanced View操作。S Lab-D Direct密码jump-smoke-only、不记住，连接读hello.txt=node=D后Disconnect；T Lab-D临时改Private Key、路径topology/fixtures/id_ed25519、空口令不记住，不Save，连接确认D后Disconnect；U临时改路径id_encrypted、空口令不记住，Connect后在原生口令框输入jump-key-only，确认D后Disconnect，切Lab-A时Discard；V Lab-A正确目标密码/第一跳D密码jump-smoke-only，但Lab-B私钥口令故意输入wrong-key，预期错误指向Lab-B及私钥校验、无活动连接且按钮可重试，保持失败结果不重试供核查。此V为加密私钥解密失败，不能替代服务端拒绝认证场景；三项Direct和失败清理均待结果。
+  - **真实文件传输核查（2026-09-12 13:41）**：用户报告完成；本地topology/upload-smoke.txt、服务端A的/home/smoke/files/upload-smoke.txt、topology/downloads内下载副本SHA256均为689df34effcd51ccd58e679e577769a289da59dddf7ced3cb2ddb84361bd3b11，内容一致。hello.txt保持node=A/ui-edit-ok。UI仅Lab-A SFTP活动，原生/Advanced文件列表均有上传文件；服务器ss实际连接逐边Local→D→C→B→A，无额外可见Jump会话。拖拽上传/下载通过，右键混合选择器问题仍未修复；传输历史另有topology目录上传与一次文件取消，不将其抹去或当成当前单文件失败。
+  - **连续批次 O–R 交接（2026-09-12 13:44）**：O Lab-A Run Remote Command执行echo command-ok | tee /home/smoke/files/command-check.txt；P Open SSH Terminal执行echo terminal-ok | tee /home/smoke/files/terminal-check.txt，再exit关闭终端；Q Advanced Server的Port Forwarding新增Lab-HTTP，Local127.0.0.1:22237→Remote127.0.0.1:18080、不自动启动，保存Start；浏览器访问http://127.0.0.1:22237/hello.txt?ui=forward-check应有node=A/ui-edit-ok；R关闭终端/命令对话框后Disconnect Lab-A，观察活动消失及转发停止。代理随后核查标记文件、HTTP访问日志、SSH资源及本地监听释放。为Q已在A容器以smoke启动fixtures/http-server.sh，仅监听A的127.0.0.1:18080，curl服务端自检hello成功，进程随A容器清理。用户批次尚未通过。
+  - **真实文件编辑与上传入口问题（2026-09-12 13:33）**：用户报告右键 Upload 的原生选择框只能选文件夹。核对 Sidebar.uploadToRemoteDirectory 默认不传mode，Panel.requestUploadEntries 将 canSelectFiles/canSelectFolders 同时设true，与 Windows 只能显示目录的表现一致；未将选择器单文件上传记通过，也未扩展Jump修复范围。当前只读UI确认Lab-A SFTP活动且Webview打开；服务端实际hello.txt为node=A和ui-edit-ok，远程编辑保存通过。下一步用户取消目录选择框，将本地topology/upload-smoke.txt单文件从Explorer拖入Lab-A Advanced View文件列表，上传后下载至topology/downloads并保持连接；代理随后核查哈希。右键混合选择器兼容性问题保留待处理，拖拽通过不代表该入口已修复。
+  - **连续批次 H–J 结果（2026-09-12 13:09）**：用户确认通过。只读数据库确认 Test-C→Test-D、Test-B→Test-C，其他 FTP/FTPS Direct；UI Quick 路线 Local→Test-D→Test-C→Test-B→Target，Connect 已启用、No open connections yet.。两套 UI 重载保持、第一跳输入后第二跳 Esc、原生密码 Not saved 为用户逐项确认；最终引用及无残留活动由代理独立核查。
+  - **真实隔离环境初验（2026-09-12 13:24）**：在 WSL Ubuntu-22.04 / Docker29.2.1 建立四个专用容器 remoteedit-pr-d/c/b/a 和三个 internal 网络 remoteedit-pr-dc/cb/ba（172.29.241/242/243.0/24），仅 D 发布到 Windows localhost:22236。容器自己的 INPUT/OUTPUT 限制前后相邻 SSH，FORWARD DROP；未改主机防火墙。B 的容器 hosts 独有 target-only.jump-test→172.29.243.3。实际 probe.py 在 Windows及各容器验证 SSH banner 可达仅 Local→D→C→B→A；其他方向不可用、名称只在B解析。Windows 对 C/B/A 的 socket.connect 返回成功但收不到 SSH banner，不能将其描述为 TCP 握手被拒绝，具体记录于 `.temp/jump-pr-validation/topology/verification.json`。
+  - **真实 SFTP 自动初验与用户交接（2026-09-12 13:24）**：`node .temp/jump-pr-validation/topology/verify-sftp.cjs` 调用真实编译 SftpSessionManager，SSH/SFTP/网络不替身，仅VSCode服务替身；D密码、C普通私钥、B加密私钥、A密码混合认证成功，一条最终活动会话，目录/读/写/读回/删除通过，disconnectAll后活动列表空。四个服务端ss无ESTABLISHED，日志均有关闭/断开记录。导入文件 `.temp/jump-pr-validation/topology/remoteedit-lab.json` 由真实buildBackupFile生成并用importBackupFile验证，含Lab-D/C/B/A及用户名、私钥路径和引用，无密码/口令/设置。下一用户批次：K 原生Import Backup→该JSON→Saved connections+Include usernames→Merge；L Webview Lab-A目标密码jump-smoke-only、不记住，Connect→Lab-D密码同值→Lab-B口令jump-key-only；M 打开hello.txt核对node=A，新增ui-edit-ok保存；N 上传topology/upload-smoke.txt并下载到topology/downloads，最后保持Lab-A连接供代理核查。真实VSCode场景尚未通过；失败/取消/共享跳资源、直连及FTP/FTPS/最终目标工具仍待执行。
+  - **测试资源清理计划（2026-09-12）**：topology/prepare.sh仅本轮首次创建时运行，重复执行会拒绝已有网络。四容器及三网络当前保留供用户测试；验收完按topology/cleanup.sh移除这七个明确资源，测试镜像/密钥/备份/缓存不进入PR或扩展包。没有操作其他Docker容器或安装编辑器。首次镜像官方源下载停滞已终止，测试Dockerfile改为HTTPS镜像源后构建成功。
+  - **连续批次 E–G 结果（2026-09-12 13:04）**：用户确认 E/F/G 均通过。代理只读核查存储共五项 Test-D/C/B/FTP/FTPS；Test-FTPS 为 ftps、ftps-smoke.invalid:21、allowSelfSigned=true、无 Jump、路径/、KeepAlive true；无 Test-SFTP-Esc、无 Quick 保存条目。UI 当前 New / Quick Connection、Jump Test-D 路线、Connect 已启用、No open connections yet.，无 Connecting；G 的 canceled 提示为用户已确认的瞬态。E 的 FTPS 向导保存、F 的合法候选过滤/有候选时 Esc 与无新增、G 的真实 Webview Quick 取消与状态复位通过。
+  - **连续批次 H–J 交接（2026-09-12 13:04）**：H 原生 Test-C 选择 Test-D 保存、Test-B 选择 Test-C 保存，确认 B 路线 Local→Test-D→Test-C→Target；I 用户重载稳定版，原生与 Webview 分别核查 C→D、B→C 及 B 嵌套路线保持，FTP/FTPS 保留且不使用 Jump；J Webview New / Quick Connection 填 quick-smoke.invalid:22/smoke、临时目标密码不记住，选择 Test-B，核对 Local→Test-D→Test-C→Test-B→Target；Connect 后在第一跳 Test-D 提示输入 synthetic 临时密码，在下一跳 Test-C 提示 Esc，核查 canceled/Connect复位/无活动或新增保存项，D/C 密码未保存。H/I 不连接；J 在逐跳凭据准备阶段取消。这一批用于稳定版嵌套保存、重载及部分逐跳输入取消，未执行前不记通过。
+  - **连续批次 A–D 结果（2026-09-12 12:37）**：用户确认 A/C/D 通过，B 仅在最后切 Test-D 时没有未保存提示。核对 Test-C 持久化仍为 SFTP、22、无 Jump，且批次前已为 Direct；B 切回原值后 isSelectedSavedConnectionDirty 为 false、不提示符合契约，B 通过。A 的 FTPS 隐藏 Jump/SFTP 恢复 Direct、B 中间态与 D 证书选择前无 Jump/按 Esc 为用户逐项观察证据；代理只读确认数据库仅 Test-D/C/B/Test-FTP，Test-FTP 为 ftp、ftp-smoke.invalid:21、无 Jump、password auth、路径/、KeepAlive true，无 Test-FTPS-Esc；UI Test-FTP Save disabled、No open connections yet.。C 保存持久化及 D 无新增已独立核查。
+  - **连续批次 E–G 交接（2026-09-12 12:37）**：E 原生保存 Test-FTPS（No group、FTPS、ftps-smoke.invalid:21、smoke、Allow self-signed/untrusted certificate、密码空、路径/、KeepAlive On），核查无 Jump 步骤与无 Jump 详情，不连接；F 原生新建 Test-SFTP-Esc（No group、SFTP、sftp-smoke.invalid:22、smoke），Jump picker 应包含 Direct 和三个已保存 SFTP，排除 Test-FTP/Test-FTPS，在 picker Esc 确认不新增；G Webview New / Quick Connection，SFTP、quick-smoke.invalid:22、smoke、Password 临时 synthetic、不记住、Jump Test-D，Connect 后 Jump Test-D 密码框 Esc，核对 canceled、按钮复位、无活动/新增保存配置，停留供核查。批次均未验收；G 是唯一发起 Connect 的分项，并在凭据准备阶段取消。
+  - **连续交互批次交接（2026-09-12 12:12）**：用户要求连续给出多个合理验证项以加快效率；改为用户逐项观察后一次报告，代理核查最终状态/持久化并区分中间态的用户确认。当前只读确认原生 Quick Connect Type: FTP、无 Jump/Route、无活动连接，FTP 中间态通过。下一批：A 原生 Quick Connect FTP→FTPS（无 Jump）→SFTP（Direct）；B Webview Test-C 的 SFTP Jump Test-D→FTP→FTPS→SFTP，核对非 SFTP 隐藏 Jump、切回 Direct，离开时如提示则 Discard；C 原生新建 Test-FTP（No group、ftp-smoke.invalid:21、smoke、密码空、路径/、KeepAlive On），无 Jump 步骤且保存后无 Jump；D 原生新建 Test-FTPS-Esc（No group、FTPS、ftps-smoke.invalid:21、smoke），用户名后直接出现证书处理选择而非 Jump，在证书选择处 Esc，列表不新增。批次均不连接；D 只证明 FTPS 向导跳过 Jump/取消，不替代 FTPS 保存或真实连接验收。各项仍待用户结果。
+  - **原生取消草稿清理（2026-09-12 12:01）**：用户确认 Modified 消失；代理只读核查原生 Test-C 无 Modified，Route: Direct，Password: Not saved，提示 Connection changes discarded.，No open connections yet.。本轮临时密码与 Jump 草稿清理通过。下一最小分项：原生 Quick Connect 在 SFTP 选择 Jump Test-D 后将 Type 改为 FTP，停留供核查；预期 Jump Host/Route 不再显示，不保存或连接。此分项补齐此前未观察的 FTP 中间态，尚未记通过。
+  - **真实原生取消复验通过（2026-09-12 11:59）**：用户完成重载及 Connect Without Saving → Jump 密码 Esc 后，代理只读核查正确稳定版窗口显示 Info: Connection canceled.；Test-C Modified、路线 Local → Test-D → Target，原生 No open connections yet.，无 Connecting 状态。当前 exthost/output_logging_20260912T115849/1-Remote Edit.log 只有激活和 [Sidebar] Connection canceled.，没有进入网络连接日志。原生入口临时密码可达 Jump 提示及取消反馈通过；未保存草稿仍保留符合当前行为。下一最小操作由用户对 Test-C 执行 Discard Connection Changes 清除本轮临时密码/Jump 草稿，不保存；代理核查 Modified 消失及密码未保存。
+  - **原生凭据失败修复交接（2026-09-12 11:57）**：用户此前收到目标 Password is required，后将原生 Test-C 的 Jump 改为 Test-D 未保存；代理 11:53 只读确认 Test-C Modified、Route: Local → Test-D → Target、无活动连接。代码回归确认 Connect Without Saving 遗漏草稿秘密，已由任务 3 修复且全量108测试通过。此前原生取消未到 Jump 阶段，不能记通过。下一步由用户在正确稳定版窗口 Developer: Reload Window，重新设置原生 Test-C 的 Jump Test-D 和 Password → Update Password 临时测试密码，不 Save；Connect → Connect Without Saving，在 Test-D Jump 密码框 Esc。重载会清掉未保存草稿，代理不替用户操作。
+  - **真实 Webview 取消复验通过（2026-09-12 11:44）**：用户重载后复测并确认看到 canceled；代理只读核查正确稳定版窗口 658682：Test-C / Jump Test-D，Connect 按钮已启用，Host/Username/Jump 可编辑，Save disabled，Password not saved，原生 No open connections yet.，文件区恢复 Connect to a host to list remote files.，无 Connecting 占位。本次 Webview 保存连接 Jump 密码 Esc 反馈与状态复位通过。下一最小分项为原生 Sidebar 同场景：Test-C 的 Password → Update Password 输入临时 synthetic 目标密码但不保存，Connect → Connect Without Saving，在 Jump Test-D 密码框 Esc；代理核查原生 canceled/活动清理，随后放弃密码草稿。
+  - **真实取消失败与修复交接（2026-09-12 11:24）**：用户报告 Jump 密码 Esc 后持续 Connecting；宿主日志 10:59:28 已记录 Connection canceled，实际 Webview Test-C 仍锁定、原生无活动连接。回流任务 3 修复宿主→Webview 临时连接清理，自动测试现为 105/105；此前配置验收保留，取消分项仍待真实复验。下一步由用户在正确 D:\Microsoft VS Code 稳定版测试窗口执行 Developer: Reload Window，选择 Test-C（Jump Test-D），输入临时测试目标密码且不记住/不保存，Connect 后在 Jump Test-D 密码框按 Esc。代理只读核查 Connect/表单恢复、无 Connecting 标签及底部 canceled。任务 9/10 不启动。
   - **执行前上下文**：读取全局契约及本任务完整块。
   - **目标文件**：
     - 本清单任务 8 的验证记录和交付结论 — 持久化命令、环境、源码版本、拓扑/交互/服务端证据及结果；本任务不新增功能代码。
@@ -533,7 +634,7 @@
     - Webview 和 Sidebar 编辑/Quick Connect：选择、Direct 清除、协议切换、保存/放弃/重载、dirty、失效引用；两套 UI 的 Jump 密码取消均为 canceled。
     - 使用可销毁且已获任务授权的测试主机/容器，Local 仅可达 D，D→C、C→B、B→A，阻断非必要路径；A 测试名称本地不可解析、B 可解析。记录可达/不可达及 DNS 证据。
     - 混合认证连接最终 A，仅最终目标注册；目录浏览、读写、上传/下载可用。阻断中间边、错误认证、取消/远端关闭/正常断开，记录节点阶段与服务端 SSH 会话关闭证据。
-    - 直接 SFTP 密码/私钥/需口令、直接 FTP/FTPS，以及最终目标 SSH Terminal、普通端口转发、远程命令和文件操作做针对性冒烟。
+    - 直接 SFTP 密码/私钥/需口令，以及最终目标 SSH Terminal、普通端口转发、远程命令和文件操作做真实冒烟。FTP/FTPS以共享路由自动回归和双UI新建/切换/Jump隐藏验证为门禁，按2026-09-12用户确认不额外搭建真实服务器，明确真实传输未执行。
     - 环境/交互工具缺失属于执行复核失败：本任务记录已完成部分与阻塞项，保持未完成或阻塞，任务 9 不启动。不得把测试环境中的真实账号/密钥写入记录。
   - **允许的实现判断**：可选择已有可销毁主机或容器实现既定拓扑；记录建立与清理方式，不扩大业务能力或执行生产环境变更。
   - **优先级**：未指定，按依赖执行。
@@ -565,9 +666,35 @@
     - 本任务 **交付结论：dev 验证通过版本** — 在全部通过时记录准确源码提交、功能/测试文件清单、真实命令及结果、双 UI 场景结果、网络/DNS限制与服务端资源证据、环境版本、临时资源清理和已知限制。清单自身完成记录不改变已验证功能源码。
     - 若未通过，使用 **交付结论：dev 验证阻塞或失败** 记录具体失败对象与证据，不生成肯定的通过结论。
   - **完成标准**：
-    - npm test、双 UI/交互新建、隔离拓扑与原有协议/工具冒烟均有真实通过证据，已创建的测试资源按计划清理。
+    - npm test、双UI/交互新建、SFTP隔离拓扑及最终目标工具真实验证通过；FTP/FTPS共享路由及UI边界回归通过，真实FTP/FTPS传输按已确认范围不执行。已创建的测试资源按计划清理。
     - 明确源码提交和移植文件清单，没有未验证的功能变更；任一必需场景缺失不能标记本任务完成。
     - 交付结论足以让任务 9 判断源版本及验证范围，不能只有“全部正常”。
+
+  - **验证时间**：2026-09-11 21:58:00；尚未完成。
+  - **已完成部分**：分支 dev，HEAD `ea25a0a0cd4f6dbcb022c7733b7713fcf5ab61a2` 加任务 7 列出的未提交实现与测试；实际 diff/新增测试清单符合候选。Windows 10.0.26200 x64、Node 24.5.0、npm 11.5.1、扩展 1.8.11；本项重新执行 npm test（含编译）102/102 通过，fail/cancelled/skipped 均为 0，git diff --check 通过。真实包清单继续引用任务 7 的 vsce 3.1.1 结果，之后只修改清单/生成已排除的 .temp 文件。
+  - **交付结论：dev 验证阻塞或失败**：VS Code Insiders `1.122.0-insider` / `859cf8dc73cc68c65bc2c6c66022f50da8e353d1` 已用 `--extensionDevelopmentPath=E:\workspace\vscode\remoteedit` 启动，扩展宿主日志确认 josegrabelha.remoteedit 的 onStartupFinished 激活。实际界面停在 `.temp/jump-pr-validation/workspace` 的工作区信任提示；用户须手动决定信任该测试目录，随后才能继续完整交互验收。computer-use 的 SKILL.md 要求遵守引用的 docs/guidance.md，其中禁止代理操作 security/privacy permission requests，故不自动点击信任。此为工具操作边界，不是业务需求重新审批。
+    - **环境已核实**：本机 PATH 的 code 是 Qoder 1.23.0，真正测试宿主为 `E:\VSCode-insider\Code - Insiders.exe`（CLI：`E:\VSCode-insider\bin\code-insiders.cmd`）；@oai/sky 已能枚举/读取目标窗口。WSL Ubuntu-22.04 中 `/usr/bin/docker` 可用，`docker info --format '{{.ServerVersion}}'` 返回 29.2.1，context 为 default；不能再将 Docker 或桌面工具列为缺失。尚未创建隔离容器、修改网络或使用真实凭据。
+    - **恢复入口**：可见窗口标题 `[Extension Development Host] Welcome - workspace - Visual Studio Code - Insiders`；工作目录 `.temp/jump-pr-validation/workspace`，可见宿主独立数据目录 `.temp/jump-pr-validation/interactive-user-data`，扩展目录 `.temp/jump-pr-validation/extensions`。另有首次以 Hidden 启动的数据目录 `.temp/jump-pr-validation/user-data`，恢复时可关闭该冗余测试实例；本轮创建的目录均保留以便恢复，不进入发布包。首次宿主激活日志位于 `.temp/jump-pr-validation/user-data/logs/20260911T215557/window1/exthost/exthost.log`。无测试主机/容器待清理。
+    - **剩余必需验证**：真实双 UI 与新建向导全部场景；Local→D→C→B→A 隔离可达性/DNS、混合认证、文件操作、失败/取消/断开服务端释放；直接 SFTP/FTP/FTPS 和最终目标工具冒烟。受控测试结果不替代这些验证；任务 9/10 未启动，也未提交、推送或创建 PR。
+  - **解除阻塞记录**：2026-09-11 21:59 用户回复“继续吧”；实际复核验证窗口信任对话框与 Restricted Mode 状态均已消失，恢复任务 8。无需重复询问信任。
+  - **真实原生侧边栏删除保护分项（2026-09-12 10:55）**：用户确认删除测试后，代理只读观察原生错误 `Cannot delete connection 'Test-D' because it is used as a jump by 'Test-C'. Remove those jump references first.`；数据库仍有三项测试配置，Test-C→Test-D 保持，No open connections yet.。原生入口被引用 Jump 删除拒绝和存储保持通过。下一最小分项：用户在 Webview Test-C 输入临时 synthetic 目标密码（不记住、不保存），点击 Connect 后在 Password required for jump "Test-D" 提示按 Esc；代理核查 canceled/状态复位。目标密码是前置必填，不能在空密码时误把目标验证失败当作 Jump 取消。
+  - **用户验证交接（2026-09-12，被引用连接删除）**：已只读确认 Webview 返回 Test-C、SFTP、Jump Test-D、Save disabled，失败的 FTP 草稿已退出；旧错误文本仍可留在底部。下一最小分项由用户在原生 Connections 列表仅右键 Test-D → Delete Connection，并核对确认框名称 Test-D 后点击 Delete。当前 Test-C→Test-D，预期宿主拒绝删除并提示 Test-C 依赖；代理随后核查错误、三项保存配置和引用仍在。目标仅为无凭据的 synthetic Test-D，不操作真实配置或网络。
+  - **真实 Webview 引用保护分项（2026-09-12 10:45）**：用户尝试将被 Test-C 引用的 Test-D 改 FTP 并保存，起初因窗口尺寸未看到底部提示，后明确确认已看到。代理只读观察错误原文 `Connection could not be saved: Cannot change connection 'Test-D' to FTP because it is used as a jump by 'Test-C'. Remove those jump references first.`；数据库确认 Test-D 仍为 sftp，Test-C→Test-D 引用保持。被引用 Jump 协议降级被拒绝、提示依赖名称、存储未变分项通过。当前 Webview 的 FTP 是失败后未保存草稿；下一步用户切换 profile 并 Discard 清除草稿。提示位于底部、小窗口可能被忽略为本次观察，不据此认定提示缺失或新增 UI 改造范围。
+  - **真实 Webview 候选/存储分项记录（2026-09-12 10:37）**：用户反馈 Test-D Jump 候选仅 Test-B 与 Direct；代理只读核查实际 jumpProfileDropdownMenu 确实只有这两个 option，Test-B 候选带 smoke@b.jump-smoke.invalid:22 与 Local → Test-B → Target 路线。测试数据库确认 Test-C→Test-D，Test-D/Test-B 无 Jump；自身 Test-D 与会形成环的 Test-C 已排除。Webview 自身/循环候选过滤及候选端点路线展示通过。下一最小用户分项：尝试将仍被 Test-C 引用的 Test-D 改为 FTP 并 Save，预期拒绝且指出依赖；代理核查错误与存储保持 SFTP，不连接。
+  - **稳定版环境纠正与真实 Webview 记录（2026-09-12 10:10）**：昨日三项测试配置未丢失，仍在 `.temp/jump-pr-validation/interactive-user-data/User/globalStorage/state.vscdb`。D:\Microsoft VS Code 为便携安装，其 data 目录覆盖 --user-data-dir，首次启动实际读到空的 `D:/Microsoft VS Code/data/user-data`。已仅为新的调试进程设置 VSCODE_PORTABLE=`.temp/jump-pr-validation/stable-portable`，其中 user-data/extensions junction 指向原测试目录；不改安装目录/日常配置，不安装卸载。用户已确认看到原配置。实际测试窗口为 D:\Microsoft VS Code\Code.exe 的 `[Extension Development Host] Remote Edit - workspace - Visual Studio Code`（本次句柄 658682），另一个中文标题空配置窗口不是当前测试对象。
+  - **真实 Webview 放弃分项（2026-09-12 10:10）**：用户在稳定版完成 Test-C 修改 Jump 为 Test-D、不保存、切换配置并 Discard、再返回。代理只读观察 Webview Test-C 为 Direct、Route: Direct、Save disabled、No open connections yet.，并只读核查上述测试 state.vscdb 中 Test-C 无 jumpProfileId。结合昨日已核实修改时 Save 启用且存储不变的证据，Webview 放弃最终结果通过；未将其他仅在 Insiders 验证过的分项自动标为稳定版重验通过。下一最小用户分项：保存 Test-C→Test-D 后打开 Test-D 的 Jump 候选，核查自身和会形成循环的 Test-C 不可选。
+  - **调试环境变更与交接（2026-09-12 09:24）**：用户明确指定今后用 `D:\Microsoft VS Code` 调试，不安装/使用上次 Insiders，并要求打开后等待其交互反馈。已运行 npm run compile 通过，使用现有 `D:\Microsoft VS Code\bin\code.cmd` 启动 dev 扩展开发宿主；版本 1.121.0 / f6cfa2ea2403534de03f069bdf160d06451ed282 / x64，进程路径与实际窗口 `[扩展开发宿主] workspace - Visual Studio Code` 均已核实。复用 `.temp/jump-pr-validation/interactive-user-data` 和测试 workspace/extensions 目录，保留昨日测试配置；未安装或卸载任何编辑器。此后以该稳定版宿主为验证环境，先等用户反馈，不自动操作 UI。昨日 Webview 放弃修改步骤的结果尚未核查，不能视为通过。用户所述软件卸载原因未调查、未确定。
+  - **真实 Webview/存储分项记录（2026-09-11 22:52）**：用户将 Webview Test-C 的 Jump 临时改为 Test-D 并停留；代理实际观察 profile Test-C、Jump Host Test-D、Route: Local → Test-D → Target，Save 按钮已启用（不再 disabled）；只读 state.vscdb 的 Test-C 仍无 jumpProfileId。修改后脏态/Save 启用与保存前存储不变分项通过。下一步用户切换 profile 到 Test-D，在 unsaved changes 对话框选择 Discard，再返回 Test-C，供核查放弃结果；不点击 Save 或 Connect。
+  - **真实 Webview/存储分项记录（2026-09-11 22:48）**：用户完成 Advanced View 中 Test-C 的 Test-D→Direct 保存并切换 profile 后返回。代理实际 Webview 可访问性树显示 profileDropdownButton 为 Test-C、jumpProfileDropdownButton 为 Direct、Route: Direct、Save disabled；只读 state.vscdb 确认 Test-C jumpProfileId 已清除，Test-B/Test-D 仍无 Jump。Webview Direct 显式清除旧引用并重新加载配置后保持通过，本轮已修复的空串序列化问题获得真实 UI 与持久化证据。下一最小分项为 Webview Test-C 选择 Test-D 后暂不保存，供代理核查脏态/Save 可用与存储仍 Direct，再指导放弃。
+  - **真实 UI 分项记录（2026-09-11 22:45）**：用户完成 Quick Connect 的 SFTP→FTP→SFTP；代理只读观察最终 Type: SFTP、Jump Host: Direct、Route: Direct，且 No open connections yet.，协议切回后旧 Jump 不恢复通过。FTP 中间态的隐藏/Not used 显示未被代理观察，用户未单独描述，不将中间态写成已核实。下一最小分项为 Webview（Remote Edit Advanced View）选择 Test-C，将 Test-D Jump 改 Direct 保存，切换其他 profile 再返回核查；不连接。
+  - **真实 UI/存储分项记录（2026-09-11 22:40）**：代理只读观察 Quick Connect 为 SFTP、Jump Host: Test-C，实际路线 Local → Test-D → Test-C → Target；No open connections yet.。验证宿主 state.vscdb 的已保存连接仍仅 Test-D/Test-C/Test-B 三项，Test-C→Test-D 保持，Test-B 与 Test-D 无 Jump。Quick Connect 选择嵌套 Jump 和不新增/改变已保存配置分项通过；尚未实际连接。下一最小分项：Quick Connect 将协议从 SFTP 切换 FTP，再切回 SFTP，用户观察 FTP 不使用 Jump、切回后 Direct，代理核查最终状态。
+  - **真实 UI/存储分项记录（2026-09-11 22:39）**：用户反馈已完成 Test-B 修改 Jump 后放弃；代理只读核查 Test-B 恢复 Jump Host: Direct、Route: Direct，当前无 Save/Discard 操作及活动连接，state.vscdb 的 Test-B 仍为 SFTP 且无 jumpProfileId。放弃后恢复及持久化结果通过；修改期间的脏态标记未被代理观察，用户未单独确认该标记，故该瞬态仍待明确。下一用户分项为 Quick Connect 选择 Test-C，停留在选择后的详情供核查，不保存为配置、不连接。
+  - **真实 UI/存储分项记录（2026-09-11 22:36）**：用户完成 Test-B 改 Direct、保存并重载；代理观察实际 Test-B 详情 Jump Host: Direct、Route: Direct、No open connections yet.，并只读核查验证宿主 state.vscdb：Test-B jumpProfileId 已不存在，Test-C→Test-D 引用保持。Direct 清除旧引用及用户重载后保持分项通过。下一最小分项为 Test-B 临时选择 Test-C 后放弃修改，验证脏态及恢复 Direct；不保存、不连接。
+  - **真实 UI/存储分项记录（2026-09-11 22:33）**：用户反馈 Test-B 已完成。代理只读查询独立验证宿主 interactive-user-data/User/globalStorage/state.vscdb 的 josegrabelha.remoteedit → remoteedit.connectionProfiles，仅输出测试配置的非秘密字段，确认 Test-B 为 SFTP b.jump-smoke.invalid:22，jumpProfileId 精确指向 Test-C 的 ID；Test-C 指向 Test-D 的 ID，Test-D 无 Jump。嵌套新建的持久化引用通过；当前可访问性快照仍显示 Test-C 详情，不能据此宣称已观察 Test-B 的嵌套路线文字。下一用户操作分项：展开 Test-B 核对嵌套路线，然后将 Jump Host 改为 Direct 并保存，代理核查引用清除及重载保持。
+  - **真实 UI 分项记录（2026-09-11 22:18）**：用户完成 Test-C 后，代理只读核查实际列表含 Test-C 与 Test-D；Test-C 详情为 c.jump-smoke.invalid:22、SFTP、smoke、Jump Host: Test-D，路线实际显示 Local → Test-D → Target；Password: Not saved、Keep Alive: On、Start Path: /，提示 Connection saved，No open connections yet.。新建时选择已保存 Jump 并保存、详情路线显示分项通过；尚未验证嵌套多跳候选、重载持久化或真实网络。按用户 22:00 后休息规则在本最小场景闭环后暂停，任务 8 保持进行中。下一待执行分项：新建 Test-B 并选择已引用 Test-D 的 Test-C，验证嵌套候选及保存后的 Local → Test-D → Test-C → Target 路线。
+  - **真实 UI 分项记录（2026-09-11 22:16）**：用户完成保存 Test-D 后，代理只读观察实际列表项 Test-D 和详情 Hostname: jump-smoke.invalid、Port: 22、Type: SFTP、Jump Host: Direct、Route: Direct、Username: smoke、Auth Method: Password、Password: Not saved、Keep Alive: On、Start Path: /；界面提示 Connection saved，活动列表 No open connections yet.。新建 Direct 保存及详情展示分项通过；尚未单独读取持久化字段/执行重载。下一最小分项为用户新建 Test-C，选择已保存 Test-D 作为 Jump，保存后代理核查引用显示；不发起网络连接。
+  - **真实 UI 分项记录（2026-09-11 22:14）**：用户完成“无候选 Jump picker → Esc”并反馈“确实没有新的 connection”；代理只读核查实际 VS Code 可访问性文本仍含 No saved connections、No open connections yet.。该分项的新建取消与列表无新增通过；真实 SecretStorage 零写入未单独读取，仍仅有自动测试证据，不扩大此处结论。下一分项由用户通过 Connections 的 + 保存 Test-D：No group / SFTP / jump-smoke.invalid:22 / smoke / Direct / Password 空密码 / startPath / / Keep Alive On；保存后代理核查列表、详情路线及可用持久化字段，不发起网络连接。
+  - **交互验证交接**：2026-09-11 用户要求“给我个操作步骤，我来做，你来核查”，后续 UI 由用户操作，代理只核查。已实际从 Native Sidebar 的 Connections 标题栏 + 启动新建（该命令在 Command Palette 被 package.json 显式隐藏）；界面原为 No saved connections。已输入名称 Jump-Esc-smoke、选择 No group，目前停在协议 picker，SFTP 默认高亮。尚未到达 Jump 步骤、尚未保存或建立连接。本轮交接场景：用户选择 SFTP，填 jump-smoke.invalid / 22 / smoke，核对用户名后出现仅有默认 Direct 的 Jump picker，按 Esc；代理随后核对 UI 和可用持久化证据。其他真实 UI 与网络验收仍未完成。因已过 22:00，按用户休息规则在该最小场景结束后暂停；不将本次交接标为验收通过。
 
 ### 9. 将已验证 dev 功能移植到干净 PR 分支并重新验证
 
@@ -586,6 +713,7 @@
       - `src/panel/RemoteEditPanel.ts`
       - `src/panel/webview/markup/Body.ts`
       - `src/panel/webview/scripts/LayoutSessions.ts`
+      - `src/panel/webview/scripts/EventBindings.ts`
       - `src/panel/webview/scripts/RemoteCommandActions.ts`
       - `src/panel/webview/scripts/RemoteSearch.ts`
       - `src/panel/webview/scripts/StateDialogs.ts`
