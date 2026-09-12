@@ -698,7 +698,12 @@
 
 ### 9. 将已验证 dev 功能移植到干净 PR 分支并重新验证
 
-- [ ] **Git 整合与验证** - 基于最新上游 main 形成聚焦的、可审查的 PR 分支
+- [x] **Git 整合与验证** - 基于最新上游 main 形成聚焦的、可审查的 PR 分支
+  - **完成时间**：2026-09-12 15:22。
+  - **交付结论：干净 PR 分支**：独立工作树E:\workspace\vscode\remoteedit-pr，分支codex/sftp-jump-host-pr；上游base 6d443738d7c05ebce1b1934d820a88df258d698c，源dev 232ec5589c77c67809eb13d6789a9bc56dc5f06d，最终head c8fc5bd4b75539016cf8179bef66a30726bdee71已推送tzraeq/remoteedit并经ls-remote一致确认。40文件、4290新增/233删除；从共同基线提取白名单patch，全部无冲突，逐一Git blob与dev源相同。CONTRIBUTING/LICENSE保持上游，规划文档/.temp/凭据不在diff；GitHub登录已确认tzraeq。
+  - **移植后验证**：在新工作树npm ci --prefer-offline成功，npm test含编译114/114，git diff --cached --check通过；vsce ls245项，无out/test、.temp或内部规划，六项runtime齐全。transplant-smoke.cjs明确加载新工作树out的真实ConnectionManager/SftpSessionManager，在重建隔离环境中验证Direct密码与D/C/B/A混合链，目录/读取/写入/读回/删除/断开均通过，各容器零ESTABLISHED。新建/Direct/嵌套自动UI测试重跑；真实UI引用任务8，因为全部40文件blob和lockfile相同、无冲突适配，未冒称在新宿主再次人工操作。
+  - **清理与推送记录**：重新移除四容器和三网络，测试镜像remoteedit-jump-pr-smoke:20260912也已移除；保留本地被排除的调试数据。首次push遇GitHub TLS连接失败，经远端查询无分支后以HTTP/1.1正常重试成功，无强推。原dev与已推送历史完整。
+  - **执行起点（2026-09-12 15:18）**：任务8已完成，dev源232ec5589c77c67809eb13d6789a9bc56dc5f06d及验收记录a062439已推送origin/dev。最新上游main仍为6d443738d7c05ebce1b1934d820a88df258d698c，贡献指南和LICENSE已读取。允许集合40项全部存在；从共同基线a18ed11f4f11580bffe87b35a17b16979305416a到固定dev源提取仅这40文件的patch。拟创建独立remoteedit-pr工作树/codex/sftp-jump-host-pr，未将内部规划或上游许可差异纳入patch。
   - **执行前上下文**：读取全局契约及本任务完整块；本任务在独立工作树操作，完成记录仍回写原 dev 目录下本清单。
   - **目标文件**：
     - Git 分支/工作树：拟在 `E:\workspace\vscode\remoteedit-pr` 创建 `codex/sftp-jump-host-pr`，基于执行时核实的最新上游 main；现有同名对象只能在身份匹配且干净时复用，否则选择未占用路径/名称并记录，不能覆盖。
@@ -791,7 +796,34 @@
 
 ### 10. 向上游 main 提交单个 PR
 
-- [ ] **PR 交付** - 提交聚焦的 SFTP Jump Host PR 并提供可审查的五项证据
+- [x] **PR 交付** - 提交聚焦的 SFTP Jump Host PR 并提供可审查的五项证据
+  - **完成时间**：2026-09-12 15:25。
+  - **交付结论：PR 提交结果**：已用tzraeq账号创建https://github.com/josegrabelha/remoteedit/pull/38，标题Add SFTP Jump Host support；base josegrabelha/remoteedit:main，head tzraeq/remoteedit:codex/sftp-jump-host-pr，验证SHA c8fc5bd4b75539016cf8179bef66a30726bdee71。创建前同head/base无已有PR；创建后重新GET确认state=open、作者/仓库/分支/SHA匹配，远端40文件diff集合与本地三点diff完全一致，4290新增/233删除，正文关联Closes #36并包含五项审查证据、114测试及真实验证/FTP未测限制。PR正文即下方已持久化草稿；未合并或发布扩展。
+  - **拟提交标题**：Add SFTP Jump Host support
+  - **拟提交正文（2026-09-12）**：
+    > Closes #36.
+    >
+    > SFTP targets that are reachable only through another SSH host can now use saved SFTP profiles as Jump Hosts. Saved connections and Quick Connect support Direct or finite nested chains in both the Webview and Native Sidebar. The new-connection wizard also offers Jump Host selection.
+    >
+    > Each target owns private ssh2 clients and forwardOut channels passed as the next client's sock. Only the outermost hop is probed locally; intermediate hostnames are resolved by the preceding jump. No local listener, port-forwarding configuration, or visible intermediate session is created.
+    >
+    > Submitted as one PR following the discussion in #36. The implementation, UI, tests, and documentation address the five review areas:
+    >
+    > - Connection cleanup: pending attempts are cancellable; each target releases its own final SFTP client and hidden chain. Intermediate end/error/close events remove the owning active session and update both interfaces. Cleanup waits for actual resource closure and bounds final SFTP shutdown to five seconds. Disconnecting one target leaves another target's chain intact.
+    > - Credentials: each hop resolves its own password/key/passphrase by profile ID. Missing credentials can be entered temporarily; Esc cancels. Existing SecretStorage and explicit encrypted-backup controls are preserved. Active snapshots and route summaries exclude passwords/passphrases.
+    > - Compatibility: Direct SFTP remains available; choosing Direct clears a saved Jump reference. FTP/FTPS remain direct. v1/v2 backups import as Direct; v3 preserves Jump references and is rejected by older extensions that only support v1/v2.
+    > - References: stable profile IDs survive renaming/moving. Self-reference, cycles, missing profiles, and non-SFTP hops are rejected. Referenced profiles cannot be deleted or converted to FTP/FTPS until their references are removed; group deletion checks external dependents.
+    > - Import/export: merge validates the combined graph; replace requires included references. Version/graph/decryption preflight happens before writes. Explicit scrypt/AES-GCM credential restoration matches profile IDs. Settings-only imports remain independent; settings/state/SecretStorage writes are not claimed to be transactional.
+    >
+    > Validation:
+    > - npm ci --prefer-offline and npm test on the clean PR worktree: 114 passing tests, including compilation. Tests cover graph/reference mutations, backups and real crypto, credential isolation, generated Webview message handling, native wizard behavior, lifecycle cleanup, and protocol routing. Controlled network/UI boundaries are used in this suite.
+    > - Manual VS Code 1.121.0 on Windows: both interfaces, interactive creation, nested choices, Direct clearing, save/discard/reload, reference protection, and password/passphrase cancellation.
+    > - Real isolated Docker SSH topology Local -> D -> C -> B -> A: only adjacent paths returned SSH banners; the target hostname resolved only on B. Mixed password/plain-key/encrypted-key authentication, three Direct authentication modes, file editing, drag-and-drop upload/download, terminal, remote commands, and ordinary port forwarding passed.
+    > - Real blocked-edge/authentication failures, cancellation during a pending forward, disconnectAll during setup, shared-reference isolation, remote intermediate-hop termination, and normal disconnect were checked against server-side session cleanup. Intermediate-hop termination also passed with keepalive disabled.
+    > - After transplantation, Direct and mixed four-hop file roundtrips were rerun using the PR worktree's compiled code. All 40 transferred file blobs match the validated dev source; there were no conflict adaptations. vsce ls contains 245 entries with required runtimes and no test/temp/planning artifacts.
+    > - FTP/FTPS shared routing and UI boundaries were verified; live FTP/FTPS transfer servers were not tested. Their transport implementations are unchanged.
+    >
+    > README and the Unreleased changelog describe configuration, cleanup, and backup compatibility. No runtime dependency version was upgraded; ssh2 is declared directly for the raw-client API already used transitively.
   - **执行前上下文**：读取全局契约及本任务完整块；仅后续执行授权覆盖本任务时进行外部提交。
   - **目标文件**：
     - GitHub 外部产物：`josegrabelha/remoteedit` 的一个 PR，base 为 `main`，head 为任务 9 已验证并推送的 `tzraeq/remoteedit` 分支。
