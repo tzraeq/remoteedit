@@ -60,11 +60,17 @@ export interface SshAuthenticationDependencyOverrides {
 export interface SshJumpChainDependencyOverrides extends SshAuthenticationDependencyOverrides {
   createClient?: () => Client;
   probe?: (options: TcpProbeOptions) => Promise<void>;
+  onUnexpectedClose?: () => void;
 }
 
-type TrackedResource =
-  | { kind: 'client'; client: Client; errorListener: (error: Error) => void }
-  | { kind: 'stream'; stream: ClientChannel; errorListener: (error: Error) => void };
+interface ResourceClosure {
+  closed: Promise<void>;
+  finishClose(): void;
+}
+
+type TrackedClient = ResourceClosure & { kind: 'client'; client: Client; started: boolean };
+type TrackedResource = TrackedClient
+  | (ResourceClosure & { kind: 'stream'; stream: ClientChannel });
 
 const MISSING_PASSPHRASE_MESSAGES = new Set([
   'Encrypted private OpenSSH key detected, but no passphrase given',
@@ -185,7 +191,10 @@ export class SshJumpChain {
   private readonly createClient: () => Client;
   private readonly probe: (options: TcpProbeOptions) => Promise<void>;
   private readonly authenticationDependencies: SshAuthenticationDependencyOverrides;
+  private readonly onUnexpectedClose?: () => void;
   private started = false;
+  private opened = false;
+  private terminationNotified = false;
   private disposed = false;
   private disposePromise?: Promise<void>;
 
@@ -196,6 +205,7 @@ export class SshJumpChain {
     this.createClient = dependencies.createClient || (() => new Client());
     this.probe = dependencies.probe || (options => assertTcpConnectionReachable(options));
     this.authenticationDependencies = dependencies;
+    this.onUnexpectedClose = dependencies.onUnexpectedClose;
   }
 
   async open(
@@ -245,7 +255,7 @@ export class SshJumpChain {
           throw stageError(hop, 'creating the SSH client', error);
         }
 
-        this.trackClient(client);
+        const resource = this.trackClient(client);
         const config: ConnectConfig = {
           host: hop.host,
           port: hop.port,
@@ -261,7 +271,7 @@ export class SshJumpChain {
         }
 
         try {
-          await this.connectClient(client, config, cancellationToken);
+          await this.connectClient(resource, config, cancellationToken);
         } catch (error) {
           throwIfCancelled(cancellationToken);
           throw stageError(hop, 'establishing the SSH connection', error);
@@ -283,6 +293,8 @@ export class SshJumpChain {
         throw new Error('The SSH jump chain did not create a final forwarding stream.');
       }
 
+      this.assertOpening(cancellationToken);
+      this.opened = true;
       return incomingSocket;
     } catch (error) {
       await this.dispose();
@@ -296,17 +308,18 @@ export class SshJumpChain {
     }
 
     this.disposed = true;
-    this.disposePromise = Promise.resolve().then(() => {
+    this.disposePromise = Promise.resolve().then(async () => {
       const resources = this.resources.splice(0).reverse();
 
       for (const resource of resources) {
         if (resource.kind === 'stream') {
           try {
             resource.stream.destroy();
+            // ssh2 emits channel close after buffered reads reach end.
+            resource.stream.resume();
           } catch {
             // Continue releasing the rest of the chain.
           }
-          resource.stream.removeListener('error', resource.errorListener);
           continue;
         }
 
@@ -321,8 +334,11 @@ export class SshJumpChain {
         } catch {
           // Continue releasing the rest of the chain.
         }
-        resource.client.removeListener('error', resource.errorListener);
+        if (!resource.started) {
+          resource.finishClose();
+        }
       }
+      await Promise.all(resources.map(resource => resource.closed));
     });
 
     return this.disposePromise;
@@ -336,17 +352,54 @@ export class SshJumpChain {
     }
   }
 
-  private trackClient(client: Client): void {
-    const errorListener = (_error: Error): void => undefined;
-    client.on('error', errorListener);
-    this.resources.push({ kind: 'client', client, errorListener });
+  private trackClosure(emitter: NodeJS.EventEmitter): ResourceClosure {
+    const onTermination = (): void => {
+      // A nested ssh2 client can emit end without close. Notify the owner so
+      // its final SFTP client cannot remain active until a keepalive timeout.
+      if (!this.opened || this.disposed || this.terminationNotified) return;
+      this.terminationNotified = true;
+      if (this.onUnexpectedClose) this.onUnexpectedClose();
+      else void this.dispose();
+    };
+    const errorListener = (_error: Error): void => onTermination();
+    let resolveClosed!: () => void;
+    const closed = new Promise<void>(resolve => {
+      resolveClosed = resolve;
+    });
+    const finishClose = (): void => {
+      emitter.removeListener('error', errorListener);
+      emitter.removeListener('end', onTermination);
+      emitter.removeListener('close', finishClose);
+      resolveClosed();
+      onTermination();
+    };
+    emitter.on('error', errorListener);
+    emitter.once('end', onTermination);
+    emitter.once('close', finishClose);
+    return { closed, finishClose };
+  }
+
+  private trackClient(client: Client): TrackedClient {
+    const resource: TrackedClient = { kind: 'client', client, started: false, ...this.trackClosure(client) };
+    this.resources.push(resource);
+    return resource;
+  }
+
+  private closeLateStream(stream: ClientChannel): void {
+    if (stream.closed) {
+      return;
+    }
+    this.trackClosure(stream);
+    stream.destroy();
+    stream.resume();
   }
 
   private connectClient(
-    client: Client,
+    resource: TrackedClient,
     config: ConnectConfig,
     cancellationToken?: ConnectionCancellationToken
   ): Promise<void> {
+    const { client } = resource;
     return new Promise((resolve, reject) => {
       let settled = false;
       let cancellationSubscription: { dispose(): void } | undefined;
@@ -391,6 +444,7 @@ export class SshJumpChain {
 
       try {
         client.connect(config);
+        resource.started = true;
       } catch (error) {
         finish(error instanceof Error ? error : new Error(errorMessage(error)));
       }
@@ -408,7 +462,9 @@ export class SshJumpChain {
 
       const finish = (error?: Error, stream?: ClientChannel): void => {
         if (settled) {
-          stream?.destroy();
+          if (stream) {
+            this.closeLateStream(stream);
+          }
           return;
         }
 
@@ -448,14 +504,16 @@ export class SshJumpChain {
           }
 
           if (settled || this.disposed || cancellationToken?.isCancellationRequested) {
-            stream.destroy();
+            this.closeLateStream(stream);
             finish(new RemoteEditOperationCancelledError('Connection cancelled.'));
             return;
           }
 
-          const errorListener = (_streamError: Error): void => undefined;
-          stream.on('error', errorListener);
-          this.resources.push({ kind: 'stream', stream, errorListener });
+          const closure = this.trackClosure(stream);
+          if (stream.closed) {
+            closure.finishClose();
+          }
+          this.resources.push({ kind: 'stream', stream, ...closure });
           finish(undefined, stream);
         });
       } catch (error) {

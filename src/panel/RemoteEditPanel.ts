@@ -987,7 +987,7 @@ export class RemoteEditPanel {
     };
   }
 
-  private sendSessions(): void {
+  private sendSessions(cancelledConnectionId?: string): void {
     const openConnections = this.sessions.listConnections();
     const openConnectionIds = new Set(openConnections.map(connection => connection.id));
     const pendingConnections = Array.from(this.activeConnectionCancellationSources.keys())
@@ -1018,9 +1018,13 @@ export class RemoteEditPanel {
       ...pendingConnections
     ].sort((first, second) => (orderIndex.get(first.id) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(second.id) ?? Number.MAX_SAFE_INTEGER));
 
+    if (cancelledConnectionId && this.state.getActiveConnectionId() === cancelledConnectionId && !allConnectionIds.has(cancelledConnectionId)) {
+      this.setActiveConnection(sessions[0]?.id, false);
+    }
     this.postMessage(RemoteEditOutboundMessageType.SessionsChanged, {
       sessions,
-      activeConnectionId: this.state.getActiveConnectionId()
+      activeConnectionId: this.state.getActiveConnectionId(),
+      cancelledConnectionId
     });
     this.postRemoteClipboardState();
   }
@@ -1340,6 +1344,13 @@ export class RemoteEditPanel {
     try {
       options = await this.connectionManager.buildConnectOptions(payload || {});
     } catch (error) {
+      if (isRemoteEditOperationCancelled(error)) {
+        if (clientConnectionId) this.setActiveConnection(clientConnectionId, false);
+        this.logInfo('Connection canceled.');
+        this.postBusy(false, 'Connection canceled.', false, undefined, clientConnectionId || undefined);
+        this.sendSessions(clientConnectionId);
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       if (clientConnectionId) {
         this.setActiveConnection(clientConnectionId, false);
@@ -1376,6 +1387,7 @@ export class RemoteEditPanel {
     this.logInfo('Connecting to remote host.', { Target: target, Protocol: String(options.connectionType || 'sftp').toUpperCase(), Authentication: options.authType, Via: via || 'Direct' });
 
     let connection;
+    let connectionCancelled = false;
 
     try {
       connection = await this.sessions.connect(options, cancellationSource.token);
@@ -1385,6 +1397,7 @@ export class RemoteEditPanel {
         || ['Connection cancelled', 'Connection canceled'].some(message => String(error instanceof Error ? error.message : error).includes(message));
 
       if (canceled) {
+        connectionCancelled = true;
         this.logInfo('Connection canceled.', { Target: target, Via: via || 'Direct' });
         this.postBusy(false, 'Connection canceled.', false, undefined, connectionId);
       } else {
@@ -1406,7 +1419,7 @@ export class RemoteEditPanel {
       this.activeConnectionCancellationSources.delete(connectionId);
       this.pendingConnectionOptions.delete(connectionId);
       cancellationSource.dispose();
-      this.sendSessions();
+      this.sendSessions(connectionCancelled || cancellationSource.token.isCancellationRequested ? connectionId : undefined);
     }
 
     if (cancellationSource.token.isCancellationRequested) {

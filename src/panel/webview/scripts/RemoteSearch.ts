@@ -534,7 +534,7 @@ export function renderRemoteSearch(): string {
       connectionType: normalizeConnectionTypeValue(connectionType.value),
       port: port.value,
       username: username.value,
-      jumpProfileId: isSftpFormConnection() ? (normalizeJumpProfileId(jumpProfileId.value) || undefined) : undefined,
+      jumpProfileId: isSftpFormConnection() ? normalizeJumpProfileId(jumpProfileId.value) : undefined,
       authType: authType.value,
       password: password.value === SAVED_SECRET_MASK ? '' : password.value,
       rememberPassword: rememberPassword.checked,

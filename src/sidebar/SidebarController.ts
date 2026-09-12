@@ -28,6 +28,7 @@ import { SidebarRemoteDragDropMoveController, type SidebarRemoteDragMoveTarget }
 import { appendDebugLog, appendPerformanceLog, createPerformanceTimer } from '../utils/outputLogger';
 import { remoteClipboardService, type RemoteClipboardItem } from '../remote/RemoteClipboardService';
 import { RemoteMoveService } from '../remote/RemoteMoveService';
+import { isRemoteEditOperationCancelled } from '../utils/progressUtils';
 
 interface ConnectionChangeNotifier {
   onDidChangeConnections?: vscode.Event<void>;
@@ -3044,10 +3045,15 @@ export class RemoteEditSidebarController implements vscode.Disposable {
       return;
     }
 
-    await this.connectSavedConnection(profileId, this.connectionDrafts.mergeProfileWithDraft(storedProfile));
+    const draft = this.connectionDrafts.getDraft(profileId);
+    await this.connectSavedConnection(profileId, {
+      ...this.connectionDrafts.mergeProfileWithDraft(storedProfile),
+      password: draft?.password,
+      passphrase: draft?.passphrase
+    });
   }
 
-  private async connectSavedConnection(profileId: string, draftProfile?: ConnectionProfile): Promise<void> {
+  private async connectSavedConnection(profileId: string, draftProfile?: ConnectionProfileInput): Promise<void> {
     const payload = draftProfile ? { ...draftProfile, id: profileId } : { id: profileId };
     await this.connectWithPayload(payload);
   }
@@ -3058,6 +3064,12 @@ export class RemoteEditSidebarController implements vscode.Disposable {
     try {
       options = await this.connectionManager.buildConnectOptions(payload || {});
     } catch (error) {
+      if (isRemoteEditOperationCancelled(error)) {
+        this.setConnectionActivity(payload.id || QUICK_CONNECT_ID, false);
+        this.output.appendLine('[Sidebar] Connection canceled.');
+        void vscode.window.showInformationMessage('Connection canceled.');
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       void vscode.window.showErrorMessage(message);
       return;

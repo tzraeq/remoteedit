@@ -4,13 +4,16 @@
 
 ### Added
 
-* Added SFTP Jump Hosts in the Webview and Native Sidebar, including validated multi-hop saved-profile chains, Quick Connect support, names-only route summaries, protected backup references, and automatic hidden SSH stream cleanup without local port mappings.
-* Added repeatable built-in Node regression tests for Jump graph validation, hop ordering, internal socket chaining, failure stages, cancellation, and resource cleanup.
+* Added SFTP Jump Hosts in the Webview, Native Sidebar, and new-connection wizard, including multi-hop saved-profile chains, Quick Connect support, route summaries, and protected backup references.
+
+### Fixed
+
+* Choosing Direct clears a saved Jump Host. Canceling a Jump password prompt is shown as cancellation.
+* Canceling SFTP connection attempts releases any hops already opened. Remote closure removes the active connection, and cleanup releases each target's private SSH chain.
 
 ### Notes
 
-* Jump Hosts are SFTP-only. FTP and FTPS connections remain direct.
-* The documented isolated multi-host topology is an external manual verification procedure and was not executed in the development environment for this change.
+* Jump Hosts are SFTP-only; FTP and FTPS remain direct. Version 3 backups preserve Jump references; older backups import as Direct, and older extensions reject version 3 backups.
 
 ## [1.8.11] - 2026-07-15
 

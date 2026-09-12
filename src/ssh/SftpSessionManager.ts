@@ -111,8 +111,11 @@ export class SftpSessionManager implements RemoteSessionManager {
 
   private readonly sessions = new Map<string, SftpClient>();
   private readonly connections = new Map<string, ActiveConnection>();
-  private readonly jumpChains = new Map<string, SshJumpChain>();
-  private readonly finalClientCloseListeners = new Map<string, { client: Client; chain: SshJumpChain; listener: () => void }>();
+  private readonly attempts = new Map<string, { cancel(): void; close(): Promise<void> }>();
+  private readonly sessionClosers = new Map<string, () => Promise<void>>();
+  private readonly closingAttempts = new Set<Promise<void>>();
+  private readonly onDidCloseConnectionEmitter = new vscode.EventEmitter<string>();
+  readonly onDidCloseConnection = this.onDidCloseConnectionEmitter.event;
   private readonly ownerNameCaches = new Map<string, Map<string, string>>();
   private readonly groupNameCaches = new Map<string, Map<string, string>>();
   private readonly ownerGroupSuggestionCaches = new Map<string, { expiresAt: number; suggestions: RemoteOwnerGroupSuggestions }>();
@@ -127,10 +130,16 @@ export class SftpSessionManager implements RemoteSessionManager {
     if (!isSftpConnectionType(options.connectionType)) {
       throw new Error('SftpSessionManager only supports SFTP connections.');
     }
+    const connectionId = options.connectionId;
+    const jumpOptions = options.jumpChain || [];
+    if (options.jumpProfileId && jumpOptions.length === 0) {
+      throw new Error(`Target "${options.name || `${options.username}@${options.host}`}" (${options.host}:${options.port}) has a jump reference but no resolved jump chain.`);
+    }
 
-    await this.disconnect(options.connectionId);
-
-    this.throwIfConnectionCancelled(cancellationToken);
+    const previousClose = this.disconnect(connectionId);
+    const source = new vscode.CancellationTokenSource();
+    const externalToken = cancellationToken;
+    cancellationToken = source.token;
 
     const readyTimeout = getNumberSetting('sshReadyTimeout', 30000, 1000, 300000);
     const jumpRuntimeSettings: SshJumpRuntimeSettings = {
@@ -138,10 +147,10 @@ export class SftpSessionManager implements RemoteSessionManager {
       keepAliveInterval: getNumberSetting('sshKeepAliveInterval', 30000, 1000, 300000),
       keepAliveCountMax: getNumberSetting('sshKeepAliveCountMax', 3, 1, 20)
     };
-    const client = new SftpClient(`remoteedit-${options.connectionId}`);
+    const client = new SftpClient(`remoteedit-${connectionId}`);
     const target: SshAuthenticationTarget = {
       kind: 'target',
-      profileId: options.connectionId,
+      profileId: connectionId,
       name: options.name || `${options.username}@${options.host}`,
       host: options.host,
       port: options.port,
@@ -152,27 +161,63 @@ export class SftpSessionManager implements RemoteSessionManager {
       passphrase: options.passphrase,
       keepAlive: options.keepAlive
     };
-    const jumpOptions = options.jumpChain || [];
-
-    if (options.jumpProfileId && jumpOptions.length === 0) {
-      throw new Error(`Target "${target.name}" (${target.host}:${target.port}) has a jump reference but no resolved jump chain.`);
-    }
-
     let jumpChain: SshJumpChain | undefined;
     let cleanupPromise: Promise<void> | undefined;
+    const sshClient = (client as unknown as { client: Client }).client;
     const cleanupAttempt = (): Promise<void> => {
-      cleanupPromise = cleanupPromise || (async () => {
-        await this.closeClientForCancellation(client);
-        await jumpChain?.dispose();
-      })();
+      if (cleanupPromise) return cleanupPromise;
+      source.cancel();
+      const wasActive = this.sessions.get(connectionId) === client;
+      if (this.attempts.get(connectionId) === attempt) {
+        this.attempts.delete(connectionId);
+        this.sessionClosers.set(connectionId, cleanupAttempt);
+      }
+      if (wasActive) {
+        this.sessions.delete(connectionId);
+        this.clearConnectionState(connectionId);
+      }
+      sshClient.removeListener('close', onClose);
+      cleanupPromise = Promise.resolve().then(async () => {
+        try {
+          await this.closeClientForDisconnect(client, connectionId, !wasActive);
+        } finally {
+          await jumpChain?.dispose();
+        }
+      }).finally(() => {
+        this.closingAttempts.delete(cleanupPromise!);
+        if (this.sessionClosers.get(connectionId) === cleanupAttempt) this.sessionClosers.delete(connectionId);
+      });
+      this.closingAttempts.add(cleanupPromise);
+      if (wasActive) this.onDidCloseConnectionEmitter.fire(connectionId);
       return cleanupPromise;
     };
-    const cancellationSubscription = cancellationToken?.onCancellationRequested(() => void cleanupAttempt());
+    const attempt = { cancel: () => source.cancel(), close: cleanupAttempt };
+    const onClose = (): void => { void cleanupAttempt(); };
+    this.attempts.set(connectionId, attempt);
+    sshClient.once('close', onClose);
+    const cancellationSubscription = externalToken?.onCancellationRequested(() => source.cancel());
+    if (externalToken?.isCancellationRequested) source.cancel();
+
+    // Race each initialization stage so even a late library result cannot register a cancelled attempt.
+    const wait = <T>(work: Promise<T>): Promise<T> => {
+      let subscription: { dispose(): void } | undefined;
+      return new Promise<T>((resolve, reject) => {
+        const cancelled = (): void => reject(new RemoteEditOperationCancelledError('Connection cancelled.'));
+        subscription = source.token.onCancellationRequested(cancelled);
+        work.then(value => {
+          if (source.token.isCancellationRequested) cancelled();
+          else resolve(value);
+        }, reject);
+        if (source.token.isCancellationRequested) cancelled();
+      }).finally(() => subscription?.dispose());
+    };
 
     try {
-      const authentication = await resolveSshAuthentication(target, cancellationToken, {
+      await wait(previousClose);
+      this.throwIfConnectionCancelled(cancellationToken);
+      const authentication = await wait(resolveSshAuthentication(target, cancellationToken, {
         promptPassphrase: (promptTarget, token) => this.promptForPrivateKeyPassphrase(promptTarget, token)
-      });
+      }));
       this.throwIfConnectionCancelled(cancellationToken);
       const config: Parameters<SftpClient['connect']>[0] = {
         host: options.host,
@@ -189,7 +234,8 @@ export class SftpSessionManager implements RemoteSessionManager {
 
       if (jumpOptions.length > 0) {
         jumpChain = new SshJumpChain(jumpRuntimeSettings, {
-          promptPassphrase: (promptTarget, token) => this.promptForPrivateKeyPassphrase(promptTarget, token)
+          promptPassphrase: (promptTarget, token) => this.promptForPrivateKeyPassphrase(promptTarget, token),
+          onUnexpectedClose: () => { void cleanupAttempt(); }
         });
         config.sock = await jumpChain.open(jumpOptions, {
           kind: 'target',
@@ -220,7 +266,7 @@ export class SftpSessionManager implements RemoteSessionManager {
       this.throwIfConnectionCancelled(cancellationToken);
 
       try {
-        await client.connect(config);
+        await wait(client.connect(config));
       } catch (error) {
         this.throwIfConnectionCancelled(cancellationToken);
 
@@ -239,28 +285,28 @@ export class SftpSessionManager implements RemoteSessionManager {
 
       this.throwIfConnectionCancelled(cancellationToken);
 
-      const platformProbe = await detectRemotePlatform(client, this.output);
+      const platformProbe = await wait(detectRemotePlatform(client, this.output));
       const remotePlatform = platformProbe.platform;
       const remoteShell = platformProbe.shell;
-      this.remotePlatforms.set(options.connectionId, remotePlatform);
-      this.remoteShells.set(options.connectionId, remoteShell);
 
-      const homePath = await this.safeCwd(client, remotePlatform);
+      const homePath = await wait(this.safeCwd(client, remotePlatform));
       this.throwIfConnectionCancelled(cancellationToken);
 
       const requestedStartPath = normalizeRemotePathForPlatform(options.startPath || homePath || '/', remotePlatform);
-      const startPath = await this.resolveStartPath(client, options.connectionId, requestedStartPath, homePath, remotePlatform);
+      const resolvedStart = await wait(this.resolveStartPath(client, requestedStartPath, homePath, remotePlatform, cancellationToken));
+      const startPath = resolvedStart.path;
       this.throwIfConnectionCancelled(cancellationToken);
 
-      this.sessions.set(options.connectionId, client);
+      this.sessions.set(connectionId, client);
 
-      if (jumpChain) {
-        this.jumpChains.set(options.connectionId, jumpChain);
-        this.attachFinalClientCloseListener(options.connectionId, client, jumpChain);
-      }
+      this.attempts.delete(connectionId);
+      this.sessionClosers.set(connectionId, cleanupAttempt);
+      this.remotePlatforms.set(connectionId, remotePlatform);
+      this.remoteShells.set(connectionId, remoteShell);
+      if (resolvedStart.style) this.windowsSftpPathStyles.set(connectionId, resolvedStart.style);
 
       const connection: ActiveConnection = {
-        id: options.connectionId,
+        id: connectionId,
         connectionType: SFTP_CONNECTION_TYPE,
         name: target.name,
         host: options.host,
@@ -281,22 +327,20 @@ export class SftpSessionManager implements RemoteSessionManager {
         capabilities: getRemoteCapabilities(SFTP_CONNECTION_TYPE, remotePlatform)
       };
 
-      this.connections.set(options.connectionId, connection);
+      this.connections.set(connectionId, connection);
       return connection;
     } catch (error) {
+      const cancelled = cancellationToken.isCancellationRequested || error instanceof RemoteEditOperationCancelledError;
       await cleanupAttempt();
-      this.sessions.delete(options.connectionId);
-      this.detachFinalClientCloseListener(options.connectionId);
-      this.jumpChains.delete(options.connectionId);
-      this.clearConnectionState(options.connectionId);
 
-      if (cancellationToken?.isCancellationRequested || error instanceof RemoteEditOperationCancelledError) {
+      if (cancelled) {
         throw new RemoteEditOperationCancelledError('Connection cancelled.');
       }
 
       throw error;
     } finally {
       cancellationSubscription?.dispose();
+      source.dispose();
     }
   }
 
@@ -321,38 +365,14 @@ export class SftpSessionManager implements RemoteSessionManager {
   }
 
 
-  private async closeClientForCancellation(client: SftpClient): Promise<void> {
-    let endPromise: Promise<unknown>;
-
-    try {
-      endPromise = Promise.resolve(client.end()).catch(() => undefined);
-    } catch {
-      endPromise = Promise.resolve();
-    }
-
-    try {
-      (client as unknown as { client?: Client }).client?.destroy();
-    } catch {
-      // Ignore forced cancellation cleanup errors.
-    }
-
-    await endPromise;
-  }
-
   async disconnect(connectionId: string): Promise<void> {
-    this.detachFinalClientCloseListener(connectionId);
-    const client = this.sessions.get(connectionId);
-
-    try {
-      if (client) {
-        await this.closeClientForDisconnect(client, connectionId);
-      }
-    } finally {
-      await this.closeJumpChain(connectionId);
+    const attempt = this.attempts.get(connectionId);
+    if (attempt) {
+      attempt.cancel();
+      await attempt.close();
+      return;
     }
-
-    this.sessions.delete(connectionId);
-    this.clearConnectionState(connectionId);
+    await this.sessionClosers.get(connectionId)?.();
   }
 
   private clearConnectionState(connectionId: string): void {
@@ -368,11 +388,14 @@ export class SftpSessionManager implements RemoteSessionManager {
     this.clearDirectoryListingCache(connectionId);
   }
 
-  private async closeClientForDisconnect(client: SftpClient, connectionId: string): Promise<void> {
+  private async closeClientForDisconnect(client: SftpClient, connectionId: string, force = false): Promise<void> {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
 
-    const endPromise = Promise.resolve(client.end()).catch(() => undefined);
+    const endPromise = Promise.resolve().then(() => client.end()).catch(() => undefined);
+    if (force) {
+      try { (client as unknown as { client: Client }).client.destroy(); } catch { /* Continue bounded cleanup. */ }
+    }
     const timeoutPromise = new Promise<void>(resolve => {
       timeout = setTimeout(() => {
         timedOut = true;
@@ -391,6 +414,11 @@ export class SftpSessionManager implements RemoteSessionManager {
       if (timeout) {
         clearTimeout(timeout);
       }
+      try {
+        (client as unknown as { client: Client }).client.destroy();
+      } catch {
+        // end can reject before closing its transport; still release the chain.
+      }
     }
 
     if (timedOut) {
@@ -402,56 +430,8 @@ export class SftpSessionManager implements RemoteSessionManager {
   }
 
   async disconnectAll(): Promise<void> {
-    const ids = Array.from(new Set([
-      ...this.sessions.keys(),
-      ...this.jumpChains.keys(),
-      ...this.finalClientCloseListeners.keys()
-    ]));
-    await Promise.all(ids.map(id => this.disconnect(id)));
-  }
-
-  private async closeJumpChain(connectionId: string): Promise<void> {
-    const chain = this.jumpChains.get(connectionId);
-    this.jumpChains.delete(connectionId);
-    await chain?.dispose();
-  }
-
-  private attachFinalClientCloseListener(connectionId: string, client: SftpClient, chain: SshJumpChain): void {
-    this.detachFinalClientCloseListener(connectionId);
-    const sshClient = (client as unknown as { client?: Client }).client;
-
-    if (!sshClient) {
-      return;
-    }
-
-    const listener = (): void => {
-      const current = this.finalClientCloseListeners.get(connectionId);
-
-      if (!current || current.client !== sshClient || current.chain !== chain) {
-        return;
-      }
-
-      this.finalClientCloseListeners.delete(connectionId);
-
-      if (this.jumpChains.get(connectionId) === chain) {
-        this.jumpChains.delete(connectionId);
-        void chain.dispose();
-      }
-    };
-
-    this.finalClientCloseListeners.set(connectionId, { client: sshClient, chain, listener });
-    sshClient.once('close', listener);
-  }
-
-  private detachFinalClientCloseListener(connectionId: string): void {
-    const current = this.finalClientCloseListeners.get(connectionId);
-
-    if (!current) {
-      return;
-    }
-
-    current.client.removeListener('close', current.listener);
-    this.finalClientCloseListeners.delete(connectionId);
+    const ids = new Set([...this.attempts.keys(), ...this.sessionClosers.keys()]);
+    await Promise.all([...this.closingAttempts, ...[...ids].map(id => this.disconnect(id))]);
   }
 
   getConnection(connectionId: string): ActiveConnection | undefined {
@@ -1549,11 +1529,11 @@ ${result.stdout.toString('utf8')}`.trim();
 
   private async resolveStartPath(
     client: SftpClient,
-    connectionId: string,
     requestedStartPath: string,
     homePath: string,
-    remotePlatform: RemotePlatform
-  ): Promise<string> {
+    remotePlatform: RemotePlatform,
+    cancellationToken: ConnectionCancellationToken
+  ): Promise<{ path: string; style?: WindowsSftpPathStyle }> {
     const candidates = Array.from(new Set([
       requestedStartPath,
       homePath || '/',
@@ -1561,18 +1541,22 @@ ${result.stdout.toString('utf8')}`.trim();
     ].map(path => normalizeRemotePathForPlatform(path, remotePlatform))));
 
     for (const candidate of candidates) {
-      for (const actualPath of this.getSftpPathCandidatesForConnection(connectionId, candidate)) {
+      const paths = isWindowsRemotePlatform(remotePlatform) ? getWindowsSftpPathCandidates(candidate) : [candidate];
+      for (const actualPath of paths) {
+        this.throwIfConnectionCancelled(cancellationToken);
         try {
           await client.list(actualPath);
-          this.rememberSuccessfulSftpPath(connectionId, actualPath);
-          return candidate;
+          this.throwIfConnectionCancelled(cancellationToken);
+          return { path: candidate, ...(isWindowsRemotePlatform(remotePlatform)
+            ? { style: inferWindowsSftpPathStyle(actualPath) } : {}) };
         } catch {
+          this.throwIfConnectionCancelled(cancellationToken);
           // Try the next path candidate.
         }
       }
     }
 
-    return candidates[0] || '/';
+    return { path: candidates[0] || '/' };
   }
 
 
