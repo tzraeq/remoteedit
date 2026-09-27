@@ -26,7 +26,7 @@
 - 扩展端已经保存活动连接和各连接当前路径，也管理 Webview 的创建、关闭。当前路径在成功列目录后更新；但另有连接初始化和导航前设置路径的调用，所以不能把任意回退路径直接当成用户已经看到的有效上传目录。[REF-004]
 - 原生 Explorer 菜单可通过 `explorer/context` 注册；项目已有 `setContext` 控制其他菜单状态的用法。Webview 提供 `visible` 和视图状态事件，不需要依赖焦点或屏幕几何位置。[REF-005]
 
-**可行性判断：源码和公开 API 层面，两项均可实现。** 入口数据、连接/目录状态和上传执行链路可以贯通，不需要实验性 API。内部拖放 MIME 属于版本相关格式，应有明确适配及回退；实际跨 Webview 的拖放和菜单生命周期尚未做端到端验证，需要在实现验收中覆盖，不能写成已实测通过。
+**2026-09-27 执行复核修正：右键上传有公开 API 实现路径；原生 Explorer → 编辑器 Webview 的直接拖放被宿主拦截，原“两个入口均可实现”的结论撤回。** MIME 生成与解析成立不足以证明事件进入 Webview。用户在隔离 VS Code 1.90 中拖入 folder，实际触发编辑器打开目录，测试消息日志未收到上传请求。宿主在 window dragstart 时禁用 Webview iframe 的 pointerEvents 并由编辑器 drop target 接收，见 REF-015。受影响实现暂停，先收敛范围再修订清单。
 
 ## 范围与用户行为
 
@@ -143,7 +143,13 @@ resourceScheme == file && remoteedit.canUploadToWebview
 
 ## 需用户确认的问题
 
-无。用户已确认保留两个上传入口、放弃反向拖放下载，现有下载目录选择逻辑保持不变。此前 Q1（拖到本地 Explorer 的下载可行性）已结束调查，不再阻塞上传清单生成。
+此前 Q1（反向拖放下载）已结束，用户已放弃，下载目录选择逻辑保持不变。
+
+- Q2：原生 Explorer → 编辑器 Webview 被 VS Code 禁用指针事件的宿主机制拦截，是否将此入口记录为平台阻塞、清理无效适配，继续完成独立右键上传？
+  - 推荐处理：保留现有系统文件管理器拖入，完成右键上传；不以无法收到事件的 MIME 解析声称实现内部拖放。
+  - 影响范围：任务 2 阻塞；任务 3 可在清单依赖修订后独立完成。
+  - 阻塞级别：阻塞 checklist 生成（受影响方案修订）。
+  - 确认状态：已提问，等待用户答复。
 
 ## 已确认不纳入本次范围的下载方向
 
@@ -304,9 +310,34 @@ resourceScheme == file && remoteedit.canUploadToWebview
   - 适用范围与限制：用于说明范围决策，不授权新增读取队列或改造下载。
   - 核实状态：已核实，2026-09-27。
 
+- REF-015
+  - 来源：https://github.com/microsoft/vscode/blob/1.90.0/src/vs/workbench/contrib/webview/browser/webviewWindowDragMonitor.ts ；https://github.com/microsoft/vscode/blob/1.90.0/src/vs/workbench/contrib/webview/browser/webviewElement.ts ；https://github.com/microsoft/vscode/blob/1.90.0/src/vs/workbench/contrib/webviewPanel/browser/webviewEditor.ts 。
+  - 用途：解释 Explorer 原生拖动为何没有进入 Webview，修正此前仅按 MIME 判断的可行性。
+  - 参考范围：webviewWindowDragMonitor 18–36；webviewElement 525–534、700–708；webviewEditor 181–186。
+  - 稳定锚点：WebviewWindowDragMonitor 构造器；WebviewElement._startBlockingIframeDragEvents/windowDidDragStart；WebviewEditor 注册 createEditorDropTarget 和 WebviewWindowDragMonitor。
+  - 原文事实：主窗口 dragstart 会禁用 Webview iframe pointerEvents，主窗口 dragend 恢复；编辑器有独立 drop target。
+  - 推导判断：内部 Explorer 拖动不进入扩展 Webview，单纯增加 MIME 解析不能接管；需撤回直接拖放已可行的结论。
+  - 适用范围与限制：固定 VS Code 1.90 编辑器 Webview；系统文件管理器来源不据此自动判为不可用。
+  - 核实状态：源码与用户实机反馈一致；测试脚本 scripts/test-upload-entrypoints.cjs，临时日志 C:/Users/tzrae/AppData/Local/Temp/remoteedit-upload-smoke-wh0eoi/results.jsonl。
+
+## 右键上传可行性实测记录（2026-09-27）
+
+用户要求单独试验右键上传入口，并确认将结果记录。测试环境为隔离的 VS Code 1.90.0，使用模拟连接与测试文件，没有连接真实服务器。
+
+已观察到：
+
+- Webview 可见且报告有效目标 /upload，本地 Explorer 获得焦点时，文件右键菜单出现 Upload to Remote Edit。
+- 点击 one.txt 后，生产命令、来源选择器与 enqueueUriUpload 生成 Upload 作业，目标为 /upload/one.txt，无额外文件选择框。
+- 右键 folder 同样生成 Upload 作业；生产目录收集器递归得到 /upload/folder/nested/中文.txt。
+- 切换到本地文本编辑器使 Webview 隐藏后，右键菜单不再出现上传项。
+
+**结论：右键入口、已报告目标的传递、目录递归及可见性菜单条件已实测可行；并非完整上传功能验收。** 测试用回调接收 enqueueTransferJob 的作业，未运行生产队列调度或网络上传，也未完整验证实际连接导航/断开、多选、冲突和取消。任务清单第 3 项仍未完成；本记录不解除内部拖放入口的平台阻塞，也不代表用户已批准清理草稿或变更整个实施范围。
+
+复核入口：scripts/test-upload-entrypoints.cjs。原始日志：C:/Users/tzrae/AppData/Local/Temp/remoteedit-upload-smoke-B5afga/results.jsonl（queued、collected）。关键结果已持久化于本节和对应清单任务 3，临时目录清理不影响结论记录。
+
 ## Review 状态与交接说明
 
-状态：**方案范围已确认，可生成 checklist**。依据为用户明确保留两个上传入口、放弃反向拖放下载、暂不修改下载目录选择逻辑，并要求本文落盘 commit/push。两个上传入口共享现有上传队列；真实跨 Webview 拖放、多选/目录完整性、菜单生命周期和目标快照仍须在实现时验收。本次仅提交方案文档，不生成清单、不继续实现；后续先按 create-task-checklist 生成任务清单。
+状态：**执行回流，Q2 收敛中**。原生拖放实测失败，任务 2 阻塞；以下为此次回流前的范围授权记录，不构成忽略新阻塞的执行依据。依据为用户明确保留两个上传入口、放弃反向拖放下载、暂不修改下载目录选择逻辑，并要求本文落盘 commit/push。两个上传入口共享现有上传队列；真实跨 Webview 拖放、多选/目录完整性、菜单生命周期和目标快照仍须在实现时验收。本次仅提交方案文档，不生成清单、不继续实现；后续先按 create-task-checklist 生成任务清单。
 
 2026-09-27 用户要求先清单后实现。此前工作树已产生未提交的上传草稿，涉及菜单注册、URI 来源解析、上传队列提取和 Webview 目标状态同步；另有测试 stub 与 vscode-uri 开发依赖。现已暂停实现并保留现场。草稿编译曾通过，但首次回归测试失败，随后只调整了测试 stub，尚未复验；不能据此标记实现完成。生成清单时必须将草稿作为待审查工作，而不是已验收成果。
 
