@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.9.4] - 2026-09-24
+
+### Added
+
+* Added reverse SSH port forwarding (remote-to-local) with Local and Remote direction selection in the Server View. Thanks to @pras02.
+
+### Improved
+
+* Improved Log Viewer Auto-scroll behavior when reviewing older entries, including stable positioning, manual access to pending lines, and a shortcut to jump back to the latest output.
+* Improved Log Viewer level highlighting with broader Linux, AIX, and Windows log format support, multiline stack-trace handling, and fewer false-positive matches.
+
+### Fixed
+
+* Fixed reverse SSH port forwarding cleanup, lifecycle handling, and multiple-forward routing edge cases.
+* Fixed Port Forward auto-start not triggering reliably when a connection becomes ready, including cases where saved Port Forward settings load after the connection is established.
+* Fixed Log Viewer Stop continuing to receive and display new lines after following was stopped, with forced cleanup for remote follow commands that do not exit promptly.
+
+## [1.9.3] - 2026-09-22
+
+### Added
+
+* Added a New Group action to the Connections sidebar toolbar. Thanks to @tzraeq.
+
+### Fixed
+
+* Fixed SFTP Jump Host selections being lost when editing or cloning saved connections. Thanks to @tzraeq.
+* Fixed open connection tabs not updating after a saved connection is renamed. Thanks to @tzraeq.
+* Fixed the Connections sidebar not updating immediately when a connection is renamed from the Advanced View.
+
 ## [1.9.2] - 2026-09-17
 
 ### Fixed

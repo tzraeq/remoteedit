@@ -186,12 +186,12 @@ Use Log Viewer from an active SSH/SFTP connection to monitor remote logs without
 - Search loaded log content, jump between matches, or show matching lines only
 - Enable case-sensitive search when needed
 - Auto-scroll with jump-to-bottom behavior
-- Optional log level highlighting
+- Optional log level highlighting for common text and structured formats, including syslog/journald, Linux auditd and SELinux/rsyslog signatures, Pino/Bunyan, OpenTelemetry, Serilog, ASP.NET Core, ANSI-colored output, multiline stack traces, and standard application log levels
 - Optional JSON log formatting with `Auto`, `On`, and `Off` modes
 - Optional line wrap and line numbers
 - Uses Sudo Mode when the active SSH/SFTP connection has sudo enabled
 
-Log Viewer is intentionally limited to SSH/SFTP connections because FTP/FTPS cannot run remote follow commands. The viewer shows continuity markers when output is limited, portable tail mode is used, or older buffered lines are discarded.
+Log Viewer is intentionally limited to SSH/SFTP connections because FTP/FTPS cannot run remote follow commands. The viewer shows continuity markers when output is limited, portable tail mode is used, or older buffered lines are discarded. Level classification is bounded to the beginning of large text records and cached with each loaded line, so scrolling and re-rendering do not repeatedly reclassify the same content.
 
 ## Transfer Queue
 
@@ -224,12 +224,14 @@ Terminal access is available from both the Webview and the Native Sidebar.
 
 ## Port Forwarding
 
-For SSH/SFTP connections, Remote Edit can manage local-to-remote SSH port forwarding definitions from the Server View.
+For SSH/SFTP connections, Remote Edit can manage local and reverse SSH port forwarding definitions from the Server View.
 
-- Add and edit named port forwards
+- Add and edit named port forwards, choosing **Local** (local-to-remote) or **Remote** (reverse, remote-to-local) direction
 - Start and stop forwards from the Port Forwarding card
 - Optionally auto-start selected forwards when a connection opens
 - Save port forward definitions as part of Remote Edit backups
+
+Reverse forwards ask the remote SSH server to listen on a bind host/port and forward incoming connections back to a target on your machine. The remote sshd needs `GatewayPorts` enabled to bind non-loopback hosts.
 
 Runtime state is not exported. Backups save the definitions, not whether a forward was running at the time of export.
 

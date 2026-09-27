@@ -99,7 +99,7 @@ export function renderEventBindings(): string {
         };
         break;
       case 'sessionsChanged': {
-        const previousSessionIds = new Set(sessions.map(session => session.id));
+        const previousSessionsById = new Map(sessions.map(session => [session.id, session]));
         const cancelledConnectionId = String(payload.cancelledConnectionId || '');
         if (cancelledConnectionId) clientPendingSessionsByConnectionId.delete(cancelledConnectionId);
         const incomingSessions = payload.sessions || [];
@@ -132,7 +132,9 @@ export function renderEventBindings(): string {
         });
         sessions.forEach(session => {
           requestServerPortForwardStatesForSession(session);
-          maybeAutoStartServerPortForwardsForSession(session, !previousSessionIds.has(session.id));
+          const previousSession = previousSessionsById.get(session.id);
+          const becameConnected = isSessionConnected(session) && (!previousSession || !isSessionConnected(previousSession));
+          maybeAutoStartServerPortForwardsForSession(session, becameConnected);
         });
         pruneConnectionViewState();
         pruneNavigationHistoryForSessions();
@@ -955,6 +957,12 @@ export function renderEventBindings(): string {
   });
   if (serverPortForwardCancelButton) serverPortForwardCancelButton.addEventListener('click', () => {
     hideServerPortForwardDialog();
+  });
+  if (serverPortForwardDirectionLocalButton) serverPortForwardDirectionLocalButton.addEventListener('click', () => {
+    selectServerPortForwardDialogDirection('local');
+  });
+  if (serverPortForwardDirectionRemoteButton) serverPortForwardDirectionRemoteButton.addEventListener('click', () => {
+    selectServerPortForwardDialogDirection('remote');
   });
   if (serverPortForwardDeleteButton) serverPortForwardDeleteButton.addEventListener('click', () => {
     showServerPortForwardRemoveDialog();
