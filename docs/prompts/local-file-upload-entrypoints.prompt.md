@@ -7,11 +7,17 @@
 1. 将本地文件从 VS Code 文件树拖入 Remote Edit Webview 的文件列表。
 2. 在本地文件上右键，显示 `Upload to Remote Edit`，上传到 Webview 当前连接的当前目录。
 
-用户已确认把这两个需求写入 prompt。本轮只整理方案，不实现、不生成 checklist。编辑器 root 标签设置属于独立需求，保留在 `docs/prompts/remote-editor-connection-label.prompt.md`，其可行性阻塞不属于本文两个上传入口的前置条件。
+用户已确认本次范围为两个上传入口，要求先生成任务清单再实现。2026-09-27 经讨论后，用户放弃反向拖到本地 Explorer 的下载方案，并决定暂不修改现有下载目录选择器的默认位置逻辑。编辑器 root 标签设置属于独立需求，保留在 `docs/prompts/remote-editor-connection-label.prompt.md`，其可行性阻塞不属于本文两个上传入口的前置条件。
 
-成功结果：两个入口都能使用现有上传队列和冲突处理，不再要求用户重新通过 Upload 文件选择框选择同一批文件；上传目标与操作当时 Webview 中的连接和目录一致。
+成功结果：两个上传入口都使用现有上传队列和冲突处理，不再要求用户重新通过 Upload 文件选择框选择同一批文件；上传目标与操作当时 Webview 中的连接和目录一致。
+
+### 用户确认的队列硬性要求（2026-09-27）
+
+上传必须进入 Remote Edit 上传队列，下载必须进入 Remote Edit 下载队列，沿用对应队列的进度、冲突处理、取消和传输记录。仅调用扩展文件系统读取、随后由 VS Code 原生复制落盘，不满足下载要求；不能事后追加一条传输记录冒充队列执行。先确定可行性，再定版方案、生成清单和实现。
 
 ## 已核实的现状与可行性
+
+以下上传现状描述已提交基线。当前工作树另有未验收草稿，见交接说明，不能作为已实现结论。
 
 - Webview 已有拖放上传：入口只识别浏览器 `Files` 类型，从 `DataTransfer.items/files` 取得文件对象；已有按本地路径上传和按内容分块暂存两条链路，没有解析 VS Code 内部资源 URI。[REF-001]
 - VS Code 1.90.0 本地文件树拖动会提供 `CodeFiles` 本地路径数组；文件资源还会出现在 `ResourceURLs`、`application/vnd.code.uri-list` 等数据中。标准 `text/uri-list` 在该版本只写入首个文件 URI。[REF-002]
@@ -113,7 +119,7 @@ resourceScheme == file && remoteedit.canUploadToWebview
 
 ## 验收标准
 
-以下是拟议功能验收条件，尚未实施：
+以下是功能验收条件；工作树已有未完成的上传入口草稿，尚未按清单验收：
 
 1. 将 VS Code 本地文件树中的单个文件拖入 Webview 文件列表，文件加入上传队列，目标为当前连接/目录；从两个来源入口进入的任务均不再弹出文件选择框。
 2. 一次拖入多个文件，每个文件只入队一次，不因标准 `text/uri-list` 只含首项而漏传，也不因多种 MIME 同时存在而重复上传。
@@ -137,7 +143,22 @@ resourceScheme == file && remoteedit.canUploadToWebview
 
 ## 需用户确认的问题
 
-无阻塞性业务问题。用户已确认两个入口都写入 prompt；上述具体命名、数据优先级与状态规则为基于现有代码形成的默认方案，供 review。
+无。用户已确认保留两个上传入口、放弃反向拖放下载，现有下载目录选择逻辑保持不变。此前 Q1（拖到本地 Explorer 的下载可行性）已结束调查，不再阻塞上传清单生成。
+
+## 已确认不纳入本次范围的下载方向
+
+用户曾评估从左侧远程树或 Webview 直接拖到原生本地 Explorer 指定位置。现有两侧远程拖放均支持目录，但用途为原连接内移动。[REF-007]
+
+调查确认：
+
+- 左侧扩展 TreeView 拖到原生 Explorer，受到 Explorer 拒绝其他树拖入的限制。[REF-008]
+- Webview 提供 ResourceURLs 可触发 VS Code 原生复制；隔离 VS Code 1.90.0 已经用户手工拖放验证，正确生成单个本地文件。[REF-009、REF-012]
+- 跨 provider 复制只向源扩展传递 readFile(source)，不传本地落点；原生 Explorer 的写入、覆盖处理和最终成功结果不能通过该接口交给 Remote Edit 管理。[REF-010、REF-011、REF-013]
+- 下载队列本身可承载异步读取任务，Transfer UI 的 to 也只是显示文字，缺少目标路径不阻止排队、显示进度或提供传输取消。不能因此笼统声称“无法入队”。真正的限制是：读取入队后，扩展只能确认内容已读取，无法保证 VS Code 随后的本地写入结果，不能提供与现有完整下载一致的状态和冲突语义。[REF-014]
+
+用户据此明确放弃该方向。本次不增加读取阶段排队、原生复制下载或替代下载入口；这些调查结论仅解释范围决策，不是待实现任务。
+
+现有 Download 继续通过 showOpenDialog 选择本地目录再进入下载队列。调用未指定 defaultUri；用户决定暂不修改默认位置逻辑，不增加记忆上次下载目录或固定目录设置。[REF-011]
 
 ## 参考资源
 
@@ -203,10 +224,90 @@ resourceScheme == file && remoteedit.canUploadToWebview
   - 适用范围与限制：拖入 Webview 文件列表的现有交互。
   - 核实状态：已核实。
 
+- REF-007
+  - 来源：`src/sidebar/SidebarRemoteDragDropMoveController.ts`；`src/panel/webview/scripts/RemoteDragDropMove.ts`；`src/panel/webview/scripts/FileBrowser.ts`。
+  - 用途：确认远程拖放现状及目录支持。
+  - 参考范围：SidebarRemoteDragDropMoveController 25–94、120–167；RemoteDragDropMove 21–72；FileBrowser 426 行。
+  - 稳定锚点：`handleDrag`、`handleDrop`、`toRemoteClipboardItem`、`buildRemoteMoveDragPayload`、`handleRemoteMoveDragStart`、`row.draggable`。
+  - 原文事实：侧边栏接受 remoteDirectory/remoteFile/remoteEntry，目标检查同一连接；Webview 仅排除父目录条目，写私有 MIME 和 text/plain，effectAllowed 为 move。
+  - 推导判断：现有目录可拖动，直接下载需要另建可被 Explorer 接收的数据契约。
+  - 适用范围与限制：现有远程移动，不代表已支持本地下载。
+  - 核实状态：已核实，2026-09-27。
+
+- REF-008
+  - 来源：https://github.com/microsoft/vscode/blob/1.90.0/src/vs/workbench/contrib/files/browser/views/explorerViewer.ts ；https://github.com/microsoft/vscode/blob/main/src/vs/workbench/contrib/files/browser/views/explorerViewer.ts 。
+  - 用途：判断本地 Explorer 对两种来源的接收条件及本地落点。
+  - 参考范围：1.90.0 的 1053–1072、1198–1249；main 的 1641–1657（2026-09-27 读取）。
+  - 稳定锚点：`FileDragAndDrop.handleDragOver` 的 Native DND / Other-Tree DND 分支；`FileDragAndDrop.drop` 中 Find parent to add to / External file DND。
+  - 原文事实：原生拖放接受 Files/CodeFiles/ResourceURLs；其他树数据直接拒绝；文件落点改为父目录，无目标时选最后的工作区根；原生拖放调用 ExternalFileImport。
+  - 推导判断：左侧树直接拖入存在平台接收限制；Webview 有原生资源导入候选路径。
+  - 适用范围与限制：1.90.0 固定源码及读取当日 main；其他树限制不能推广为所有来源都不能拖入；跨 Webview 实际行为未实测。
+  - 核实状态：源码已核实，运行时未核实。
+
+- REF-009
+  - 来源：https://github.com/microsoft/vscode/blob/1.90.0/src/vs/platform/dnd/browser/dnd.ts ；https://github.com/microsoft/vscode/blob/1.90.0/src/vs/workbench/contrib/files/browser/fileImportExport.ts 。
+  - 用途：确认资源 URI 到文件提供器再到本地复制的链路。
+  - 参考范围：dnd 59–84、142–143；fileImportExport 421–499、504–570。
+  - 稳定锚点：`extractEditorsDropData`、`extractEditorsAndFilesDropData`、`ExternalFileImport.doImport`、`ExternalFileImport.importResources`。
+  - 原文事实：解析 ResourceURLs；激活资源 scheme 的 provider；检查冲突后创建 copy:true 的 ResourceFileEdit；目录拖到根目录有额外提示。
+  - 推导判断：可以触发 VS Code 原生复制，但冲突和进度不走 Remote Edit 下载队列，因此不能用作满足本次要求的下载方案。
+  - 适用范围与限制：VS Code 1.90.0 桌面；源 URI 必须可由提供器读取。
+  - 核实状态：源码已核实；Webview 单文件原生复制实测成功见 REF-012，不代表扩展队列或目录拖放通过。
+
+- REF-010
+  - 来源：`src/filesystem/RemoteEditFileSystemProvider.ts`。
+  - 用途：确认可复用的远程资源读取和 URI 契约。
+  - 参考范围：27–44、54–99、226–285。
+  - 稳定锚点：`RemoteEditFileSystemProvider.stat`、`readDirectory`、`readFile`、`buildRemoteEditUri`、`parseRemoteEditUri`。
+  - 原文事实：通过解析出的连接 ID 和真实路径读取远程内容；支持目录列举和虚拟根路径解析。
+  - 推导判断：拖出 URI 可复用现有提供器，不必先下载到临时文件。
+  - 适用范围与限制：要求对应连接仍有效；复制用途的错误、取消提示需要在实现时核对。
+  - 核实状态：已核实。
+
+- REF-011
+  - 来源：`src/panel/RemoteEditPanel.ts`；`node_modules/@types/vscode/index.d.ts`。
+  - 用途：核对现有下载队列所需输入、接收拖放的公开 API 范围，以及创建事件能否接管复制。
+  - 参考范围：RemoteEditPanel 3302–3354；vscode 类型定义 12053–12110、6253–6286、13556–13596。
+  - 稳定锚点：`requestDownloadEntries`、`runDownloadTransfer`、`TreeDragAndDropController.handleDrop`、`DocumentDropEditProvider`、`FileWillCreateEvent`。
+  - 原文事实：Download 任务闭包持有 connectionId、entries、targetFolder；handleDrop 属于控制器自己的 tree；DocumentDropEditProvider 接收文本编辑器 document/position；创建事件只有待创建 URIs、token 和 waitUntil。
+  - 推导判断：已有队列可复用，但这些 API 不提供内置 Explorer 的来源/落点及原生复制接管契约。
+  - 适用范围与限制：项目公开 API 定义和当前下载实现；不能将 TreeView 的 target 当作内置 Explorer 的可订阅落点。
+  - 核实状态：已核实，2026-09-27。
+
+- REF-012
+  - 来源：隔离实验目录 `C:/Users/tzrae/AppData/Local/Temp/remoteedit-dnd-probe-lnbvCL`。
+  - 用途：记录真实 Webview → Explorer 文件复制证据。
+  - 参考范围：`extension/extension.js` 中 activate、内存 provider 和 Webview dragstart；`events.jsonl` 中最后一次 webview-drag 后的 stat/read 记录；`workspace/destination/webview.txt` 全文（14 字节验证产物）。
+  - 稳定锚点：`["webview-drag","/webview.txt"]`、`["read","/webview.txt"]`、文件内容 `webview bytes` 加换行。
+  - 原文事实：VS Code 1.90.0；用户手动拖入后发生 provider 读取，并生成正确本地文件。
+  - 推导判断：原生复制可行；不能推出存在队列接管能力。
+  - 适用范围与限制：单文件、隔离内存 provider；未实测多选/目录/真实服务器；临时证据可能被系统清理，关键结果已写入本文。
+  - 核实状态：已核实，2026-09-27 21:05 检查。
+
+- REF-013
+  - 来源：https://github.com/microsoft/vscode/blob/1.90.0/src/vs/platform/files/common/fileService.ts 。
+  - 用途：确认源 provider 的 copy 是否收到跨 scheme 的本地目标。
+  - 参考范围：789–805、831–851、1388–1393。
+  - 稳定锚点：`FileService.doMoveCopy` 中 same provider with fast copy；`doCopyFile`；`doPipeUnbufferedQueued`。
+  - 原文事实：仅 sourceProvider === targetProvider 时调用 provider.copy；否则分开读取源和写入目标；sourceProvider.readFile(source) 只接收源 URI。
+  - 推导判断：给 RemoteEditFileSystemProvider 添加 copy 不能截获 remoteedit: → file: 复制；原生目标不传给源扩展。
+  - 适用范围与限制：VS Code 1.90.0 已核对实现，结合公开 API 的能力边界；不支持据此声称永久不可能由未来 API 实现。
+  - 核实状态：已核实，2026-09-27。
+
+- REF-014
+  - 来源：`src/panel/PanelTypes.ts`；`src/panel/TransferQueueSnapshot.ts`；`src/panel/webview/scripts/TransfersStatus.ts`；`src/panel/RemoteEditPanel.ts`。
+  - 用途：区分通用队列/UI 能力与现有完整下载执行的目标路径依赖，解释已放弃方案的准确限制。
+  - 参考范围：PanelTypes 102–158；TransferQueueSnapshot 3–26；TransfersStatus 305–334；RemoteEditPanel 3348–3490。
+  - 稳定锚点：`QueuedTransferJob.run`、`TransferQueueItemSnapshot.to`、`buildTransferQueueItemSnapshot`、`renderTransferQueueItem`、`runDownloadTransfer`。
+  - 原文事实：队列通过 run 回调执行任务；to 序列化为 UI 显示文本；runDownloadTransfer 同时负责本地冲突检查、目录创建、远程读取和本地写入。
+  - 推导判断：异步远程读取可以接入队列；缺少目标路径并不妨碍显示 UI，但不能原样复用完整下载执行并保证最终本地写入状态。
+  - 适用范围与限制：用于说明范围决策，不授权新增读取队列或改造下载。
+  - 核实状态：已核实，2026-09-27。
+
 ## Review 状态与交接说明
 
-状态：**待 review**。
+状态：**方案范围已确认，可生成 checklist**。依据为用户明确保留两个上传入口、放弃反向拖放下载、暂不修改下载目录选择逻辑，并要求本文落盘 commit/push。两个上传入口共享现有上传队列；真实跨 Webview 拖放、多选/目录完整性、菜单生命周期和目标快照仍须在实现时验收。本次仅提交方案文档，不生成清单、不继续实现；后续先按 create-task-checklist 生成任务清单。
 
-用户已确认两项功能方向及编写 prompt 的范围。本文已收敛来源数据格式、两个触发入口、菜单显示条件、目标快照和共用上传链路；无阻塞性业务问题，可以作为后续 checklist 的输入，但本轮不自动进入 create/execute。
+2026-09-27 用户要求先清单后实现。此前工作树已产生未提交的上传草稿，涉及菜单注册、URI 来源解析、上传队列提取和 Webview 目标状态同步；另有测试 stub 与 vscode-uri 开发依赖。现已暂停实现并保留现场。草稿编译曾通过，但首次回归测试失败，随后只调整了测试 stub，尚未复验；不能据此标记实现完成。生成清单时必须将草稿作为待审查工作，而不是已验收成果。
 
-执行时必须保留真实 VS Code 拖放、多选目录完整性、菜单可见性及目标固定的验收要求。当前“可行”是代码/API 链路判断，没有声称运行验收已完成。本轮只新增本文档，没有修改业务代码、配置或既有 checklist。
+本轮在用户纠正顺序后仅更新本文档及核查源码，没有继续改动实现。REF-001 至 REF-006 描述先前核对的基线；工作树草稿已改变部分位置与行为，执行时按稳定锚点重新定位，并区分基线能力与未验收草稿。
