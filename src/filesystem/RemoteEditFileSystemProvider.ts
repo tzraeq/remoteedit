@@ -231,7 +231,7 @@ export function buildRemoteEditUri(
 ): vscode.Uri {
   const normalizedRemotePath = remotePath.startsWith('/') ? remotePath : `/${remotePath}`;
   if (options.rootSegments?.length) {
-    const virtualRoot = options.rootSegments.map(normalizeEditorRootSegment).join('/');
+    const virtualRoot = options.rootSegments.map(normalizeEditorRootSegment).join(' | ');
     const remotePathWithoutRoot = normalizedRemotePath.replace(/^\/+/, '');
 
     return vscode.Uri.from({

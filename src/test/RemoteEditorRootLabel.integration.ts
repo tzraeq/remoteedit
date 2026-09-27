@@ -43,13 +43,13 @@ export async function run(): Promise<void> {
       for (const remotePath of ['/', '/etc/app/config.yml', '/目录/空 格 #?%.txt']) {
         const uri = buildRemoteEditUri(connection.id, remotePath, connection.host, { readOnly, openSource, rootSegments: await resolve() });
         assert.equal(uri.scheme, readOnly ? 'remoteedit-readonly' : 'remoteedit');
-        assert.equal(uri.path, `/生产环境/应用 A.v2 #?%${remotePath === '/' ? '' : remotePath}`);
+        assert.equal(uri.path, `/生产环境 | 应用 A.v2 #?%${remotePath === '/' ? '' : remotePath}`);
         assert.deepEqual(roundTrip(uri), { connectionId: connection.id, remotePath, openSource });
       }
     }
   }
   const special = buildRemoteEditUri('a/b', '/file.txt', '', { rootSegments: ['.', '../A\\B/#?%'] });
-  assert.equal(special.path, '/．/..／A＼B／#?%/file.txt');
+  assert.equal(special.path, '/． | ..／A＼B／#?%/file.txt');
   assert.equal(roundTrip(special).connectionId, 'a/b');
   const collision = buildRemoteEditUri('a-b', '/file.txt', '', { rootSegments: ['.', '../A\\B/#?%'] });
   assert.notEqual(special.toString(), collision.toString());
@@ -69,6 +69,10 @@ export async function run(): Promise<void> {
     getConnection: (id: string) => { assert.equal(id, connection.id); return connection; },
     prepareFileForOpen: async () => undefined,
     stat: async () => ({ type: 'file', modifyTime: 1, size: backing.length }),
+    listDirectory: async (id: string, path: string) => {
+      operations.push({ operation: 'list', id, path });
+      return [{ name: 'etc', type: 'directory' }];
+    },
     readFile: async (id: string, path: string) => { operations.push({ operation: 'read', id, path }); return backing; },
     writeFile: async (id: string, path: string, content: Buffer) => { operations.push({ operation: 'write', id, path }); backing = content; },
     rename: async () => { assert.fail('Display settings must not rename remote files'); },
@@ -81,6 +85,21 @@ export async function run(): Promise<void> {
     vscode.workspace.registerFileSystemProvider('remoteedit-readonly', readonlyProvider, { isCaseSensitive: true, isReadonly: true })
   ];
   try {
+    for (const readOnly of [false, true]) {
+      for (const rootSegments of [['Production', 'API'], ['生产环境', '应用 A'], ['API']]) {
+        const file = buildRemoteEditUri(connection.id, '/etc/config.yml', connection.host, { readOnly, rootSegments });
+        const root = file.with({ path: file.path.slice(0, file.path.indexOf('/', 1)) });
+        assert.equal(root.path, `/${rootSegments.join(' | ')}`);
+        const filesystem = readOnly ? readonlyProvider : provider;
+        assert.deepEqual(await filesystem.readDirectory(vscode.Uri.parse(root.toString())), [['etc', vscode.FileType.Directory]]);
+        assert.deepEqual(operations.at(-1), { operation: 'list', id: connection.id, path: '/' });
+        await filesystem.readDirectory(root.with({ path: `${root.path}/etc` }));
+        assert.deepEqual(operations.at(-1), { operation: 'list', id: connection.id, path: '/etc' });
+      }
+    }
+    const legacy = vscode.Uri.from({ scheme: 'remoteedit', authority: connection.id, path: '/Production/API/etc/config.yml',
+      query: new URLSearchParams({ connectionId: connection.id, remoteRoot: 'Production/API' }).toString() });
+    assert.equal(roundTrip(legacy).remotePath, '/etc/config.yml');
     // Exercise the real open methods, replacing only unrelated services and view feedback.
     const panel = Object.assign(Object.create(RemoteEditPanel.prototype), {
       sessions, connectionManager: manager, requireActiveConnectionId: () => connection.id,
@@ -89,7 +108,7 @@ export async function run(): Promise<void> {
     const sidebar = Object.assign(Object.create(RemoteEditSidebarController.prototype), { sessions, connectionManager: manager });
     await panel.openFile('/etc/config.yml');
     const editor = vscode.window.activeTextEditor!;
-    assert.equal(editor.document.uri.path, '/生产环境/应用 A/etc/config.yml');
+    assert.equal(editor.document.uri.path, '/生产环境 | 应用 A/etc/config.yml');
     await editor.edit(edit => edit.insert(new vscode.Position(0, 0), 'unsaved\n'));
     const oldUri = editor.document.uri.toString();
     const writesBefore = operations.filter(item => item.operation === 'write').length;
@@ -123,17 +142,17 @@ export async function run(): Promise<void> {
     await config.update('editorRootLabel', 'connectionName', vscode.ConfigurationTarget.Global);
     for (const readOnly of [false, true]) {
       await sidebar.openRemoteFileInEditor(connection.id, '/etc/sidebar.yml', readOnly);
-      assert.equal(vscode.window.activeTextEditor!.document.uri.path, '/生产环境/应用 A/etc/sidebar.yml');
+      assert.equal(vscode.window.activeTextEditor!.document.uri.path, '/生产环境 | 应用 A/etc/sidebar.yml');
       assert.equal(vscode.window.activeTextEditor!.document.uri.scheme, readOnly ? 'remoteedit-readonly' : 'remoteedit');
       await panel.openEntriesWithMode({ entries: [{ path: '/etc/selection.yml', type: 'file' }] }, readOnly);
-      assert.equal(vscode.window.activeTextEditor!.document.uri.path, '/生产环境/应用 A/etc/selection.yml');
+      assert.equal(vscode.window.activeTextEditor!.document.uri.path, '/生产环境 | 应用 A/etc/selection.yml');
       assert.equal(vscode.window.activeTextEditor!.document.uri.scheme, readOnly ? 'remoteedit-readonly' : 'remoteedit');
     }
     await panel.compareSelectedEntries({ entries: [{ path: '/left/config.yml', type: 'file' }, { path: '/right/config.yml', type: 'file' }] });
     const input = vscode.window.tabGroups.activeTabGroup.activeTab!.input;
     assert.ok(input instanceof vscode.TabInputTextDiff);
-    assert.equal(input.original.path, '/生产环境/应用 A/left/config.yml');
-    assert.equal(input.modified.path, '/生产环境/应用 A/right/config.yml');
+    assert.equal(input.original.path, '/生产环境 | 应用 A/left/config.yml');
+    assert.equal(input.modified.path, '/生产环境 | 应用 A/right/config.yml');
     assert.equal(input.original.scheme, 'remoteedit-readonly');
     assert.ok(operations.filter(item => item.operation === 'read').every(item => !item.path.includes('生产环境')));
     console.log(`Editor root label integration passed in VS Code ${vscode.version}.`);
